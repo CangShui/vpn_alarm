@@ -205,6 +205,17 @@ def get_known_ips():
     return list(all_ips)
 
 
+def db_ping():
+    """轻量数据库连通性检查，用于健康检查"""
+    try:
+        conn = get_connection()
+        conn.execute('SELECT 1')
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def get_db_stats():
     conn = get_connection()
     scan_count = conn.execute('SELECT COUNT(*) as c FROM scan_records').fetchone()['c']

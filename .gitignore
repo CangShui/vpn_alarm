@@ -26,6 +26,9 @@ test_*.py
 *.swp
 *.swo
 
+# GeoIP database (user must download separately)
+GeoLite2-City.mmdb
+
 # OS
 Thumbs.db
 .DS_Store

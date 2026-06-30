@@ -26,6 +26,14 @@ wget https://raw.githubusercontent.com/CangShui/vpn_alarm/main/docker-compose.ym
 wget https://raw.githubusercontent.com/CangShui/vpn_alarm/main/config.json
 ```
 
+下载 `GeoLite2-City.mmdb` 到该目录（可选，用于城市级 IP 归属地解析）:
+
+```bash
+wget -O GeoLite2-City.mmdb "https://git.io/GeoLite2-City.mmdb"
+```
+
+> **注意**: `GeoLite2-City.mmdb` 不提供也不会影响系统核心功能（服务器监控、在线统计、告警推送），仅城市级 IP 解析不可用。该文件需遵循 [MaxMind GeoLite2 EULA](https://www.maxmind.com/en/geolite2/eula)。
+
 ### 3. 修改配置
 
 编辑 `config.json`，填入你的服务器信息和通知渠道：
@@ -68,7 +76,7 @@ docker compose up -d
 
 - **servers**: SSH 服务器列表，支持 `ikev2` / `openvpn` 两种类型
 - **notifications**: 支持 Telegram Bot 和 Webhook 通知
-- **geo_file_path**: GeoIP 数据库路径（镜像内置 `GeoLite2-City.mmdb`）
+- **geo_file_path**: GeoIP 数据库路径（默认 `/app/GeoLite2-City.mmdb`，需用户自行下载并通过 volume 挂载）
 
 > 注意: 如需使用 SSH 密钥认证，请将密钥文件放在部署目录并通过 volumes 挂载到容器内。
 
@@ -96,8 +104,96 @@ tail -50 logs/stderr.log
 grep "服务器名称" logs/stdout.log
 ```
 
+## 健康检查
+
+系统提供 `/healthz` 接口用于运行状态监控，返回结构化 JSON：
+
+```bash
+curl http://localhost:5000/healthz
+```
+
+### 检查项
+
+| 检查项 | 说明 |
+|--------|------|
+| `flask` | Flask 应用可响应 |
+| `database` | SQLite 数据库可访问 |
+| `scheduler` | APScheduler 已启动 |
+| `scan_job` | 周期扫描任务 `periodic_scan` 存在 |
+| `last_scan` | 最近一次扫描未超时（阈值 = 3× 扫描间隔 + 60 秒缓冲） |
+
+### 响应示例
+
+**健康** (HTTP 200)：
+```json
+{
+  "status": "healthy",
+  "checks": {
+    "flask": {"status": "ok"},
+    "database": {"status": "ok"},
+    "scheduler": {"status": "ok"},
+    "scan_job": {"status": "ok", "next_run": "2026-06-30 12:00:00"},
+    "last_scan": {
+      "status": "ok",
+      "last_scan_time": "2026-06-30 11:59:30",
+      "elapsed_seconds": 30.5,
+      "scan_interval": 60,
+      "threshold_seconds": 240
+    }
+  },
+  "timestamp": "2026-06-30 12:00:00"
+}
+```
+
+**不健康** (HTTP 503)：
+```json
+{
+  "status": "unhealthy",
+  "checks": {
+    "flask": {"status": "ok"},
+    "database": {"status": "ok"},
+    "scheduler": {"status": "fail", "error": "调度器未运行"},
+    "scan_job": {"status": "fail", "error": "调度器未初始化"},
+    "last_scan": {"status": "fail", "error": "上次扫描已过去 300 秒，超过阈值 240 秒"}
+  },
+  "timestamp": "2026-06-30 12:05:00"
+}
+```
+
+### Docker 健康检查
+
+Docker 镜像内置了 `HEALTHCHECK`（30s 间隔 / 10s 超时 / 3 次重试 / 60s 启动缓冲），自动通过 `/healthz` 判定容器状态。使用 `docker ps` 或 `docker inspect` 可查看容器健康状态。
+
+### 自愈重启机制
+
+系统内置 **watchdog 自愈线程**，持续监控关键健康指标（数据库、调度器、扫描任务、扫描超时）。当关键故障持续超过阈值时，进程主动以非零退出码退出，由 Docker 的 `restart: unless-stopped` 策略自动重启容器，形成完整恢复闭环。
+
+| 配置项 | 说明 |
+|--------|------|
+| `restart: unless-stopped` | 容器非正常退出时自动重启（`docker-compose.yml`） |
+| watchdog 检查周期 | 扫描间隔的一半，最低 15 秒 |
+| 退出阈值 | max(300 秒, 5 × 扫描间隔)，采用保守策略避免误杀 |
+| 启动缓冲 | watchdog 启动后等待 60 秒再开始检查 |
+| 故障恢复 | healthy 恢复后自动清零累计状态，支持瞬时抖动 |
+
+**不会触发退出的情况：**
+- SSH 单次采集失败（局部问题，不影响整体健康判定）
+- 瞬时网络抖动导致 1-2 次检查失败
+- `/healthz` 返回 HTTP 503 但持续时间未达阈值
+
+**会触发退出的关键故障：**
+1. 调度器未运行
+2. 周期扫描任务丢失
+3. 最近扫描超时超过阈值
+4. 数据库不可访问
+
+容器重启后，Docker 日志中可见明确退出原因：
+```
+[WATCHDOG] 关键 unhealthy 已持续 360s，超过阈值 300s，主动退出进程
+```
+
 ---
 
 ## 许可说明
 
-本仓库包含 `GeoLite2-City.mmdb`，该文件来自 MaxMind，需遵循 [GeoLite2 EULA](https://www.maxmind.com/en/geolite2/eula)。未经授权不得用于商业用途，使用者需自行确认合规性。
+本系统支持使用 MaxMind 的 `GeoLite2-City.mmdb` 进行城市级 IP 归属地解析。该文件不再随镜像分发，用户需自行从 MaxMind 下载并遵循 [GeoLite2 EULA](https://www.maxmind.com/en/geolite2/eula)。未经授权不得用于商业用途，使用者需自行确认合规性。

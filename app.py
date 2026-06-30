@@ -5,6 +5,7 @@ Flask Web + APScheduler 定时采集 + SQLite 存储
 import json
 import sys
 import os
+import time
 import threading
 from datetime import datetime
 
@@ -14,7 +15,7 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database import init_db, save_scan_record, save_event, get_latest_scan_per_server, \
-    get_recent_scans, get_recent_events, get_known_ips, get_db_stats, \
+    get_recent_scans, get_recent_events, get_known_ips, db_ping, get_db_stats, \
     get_scans_paginated, get_events_paginated, prune_all
 from collector import collect_server
 from geo_resolver import init_resolvers, resolve_ips, get_resolver_status
@@ -31,6 +32,16 @@ last_online_counts = {}  # server_name -> int
 alerted_client_keys = {}  # server_name -> set of (ip, marker)
 _collect_lock = threading.Lock()
 scheduler = None
+_last_scan_start_time = None   # datetime
+_last_scan_end_time = None     # datetime
+
+# ---- 自愈 watchdog 全局状态 ----
+_watchdog_first_unhealthy_time = None  # datetime: 首次检测到关键 unhealthy 的时间
+_watchdog_consecutive_unhealthy_count = 0  # 连续关键 unhealthy 次数
+_watchdog_enabled = True  # 控制 watchdog 线程启停（测试用）
+
+# 会导致进程主动退出的关键健康检查项
+CRITICAL_CHECKS = {'database', 'scheduler', 'scan_job', 'last_scan'}
 
 
 def _normalize_client_details(raw_details):
@@ -101,6 +112,9 @@ def notify_event(event_type, detail, server_name=''):
 
 def do_scan():
     """执行一次完整采集"""
+    global _last_scan_start_time, _last_scan_end_time
+    _last_scan_start_time = datetime.now()
+
     cfg = load_config()
     servers = cfg.get('servers', [])
     alert_window = max(1, int(cfg.get('connection_alert_window', 300)))
@@ -174,6 +188,7 @@ def do_scan():
             print(f"  -> 状态={result['status']}, 在线={result['online_count']}, "
                   f"IPs={result['client_ips']}, 耗时={result['duration_ms']}ms", flush=True)
 
+    _last_scan_end_time = datetime.now()
     return results
 
 
@@ -198,7 +213,175 @@ def on_scan_interval_changed():
         print(f"[SCHEDULER] 扫描间隔已更新为 {interval} 秒", flush=True)
 
 
+def health_check():
+    """健康检查：返回所有子检查的状态和详细信息"""
+    checks = {}
+    healthy = True
+
+    # 1. Flask 应用可响应 — 此函数能执行即证明 Flask 可响应
+    checks['flask'] = {'status': 'ok'}
+
+    # 2. 数据库可访问
+    try:
+        db_ok = db_ping()
+        checks['database'] = {'status': 'ok' if db_ok else 'fail'}
+        if not db_ok:
+            healthy = False
+    except Exception as e:
+        checks['database'] = {'status': 'fail', 'error': str(e)}
+        healthy = False
+
+    # 3. APScheduler 已启动
+    try:
+        if scheduler is not None and scheduler.running:
+            checks['scheduler'] = {'status': 'ok'}
+        else:
+            checks['scheduler'] = {'status': 'fail', 'error': '调度器未运行'}
+            healthy = False
+    except Exception as e:
+        checks['scheduler'] = {'status': 'fail', 'error': str(e)}
+        healthy = False
+
+    # 4. 周期扫描任务存在
+    try:
+        if scheduler is not None:
+            job = scheduler.get_job('periodic_scan')
+            if job is not None:
+                checks['scan_job'] = {'status': 'ok', 'next_run': str(job.next_run_time) if job.next_run_time else None}
+            else:
+                checks['scan_job'] = {'status': 'fail', 'error': 'periodic_scan 任务不存在'}
+                healthy = False
+        else:
+            checks['scan_job'] = {'status': 'fail', 'error': '调度器未初始化'}
+            healthy = False
+    except Exception as e:
+        checks['scan_job'] = {'status': 'fail', 'error': str(e)}
+        healthy = False
+
+    # 5. 最近一次扫描时间未超时
+    cfg = load_config()
+    scan_interval = max(1, int(cfg.get('scan_interval', 60)))
+    # 阈值策略：3 倍扫描间隔 + 60 秒缓冲（保守合理）
+    threshold = scan_interval * 3 + 60
+
+    last_time = _last_scan_end_time or _last_scan_start_time
+    if last_time is not None:
+        elapsed = (datetime.now() - last_time).total_seconds()
+        last_scan_str = last_time.strftime('%Y-%m-%d %H:%M:%S')
+        if elapsed <= threshold:
+            checks['last_scan'] = {
+                'status': 'ok',
+                'last_scan_time': last_scan_str,
+                'elapsed_seconds': round(elapsed, 1),
+                'scan_interval': scan_interval,
+                'threshold_seconds': threshold
+            }
+        else:
+            checks['last_scan'] = {
+                'status': 'fail',
+                'last_scan_time': last_scan_str,
+                'elapsed_seconds': round(elapsed, 1),
+                'scan_interval': scan_interval,
+                'threshold_seconds': threshold,
+                'error': f'上次扫描已过去 {elapsed:.0f} 秒，超过阈值 {threshold} 秒'
+            }
+            healthy = False
+    else:
+        checks['last_scan'] = {
+            'status': 'fail',
+            'last_scan_time': None,
+            'elapsed_seconds': None,
+            'scan_interval': scan_interval,
+            'threshold_seconds': threshold,
+            'error': '尚未执行过扫描'
+        }
+        healthy = False
+
+    return {
+        'status': 'healthy' if healthy else 'unhealthy',
+        'checks': checks,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }, healthy
+
+
+def _get_watchdog_threshold():
+    """获取自愈 watchdog 的持续 unhealthy 阈值（秒）。
+    采用保守策略：max(300 秒, 5 倍扫描间隔)"""
+    try:
+        cfg = load_config()
+        scan_interval = max(1, int(cfg.get('scan_interval', 60)))
+    except Exception:
+        scan_interval = 60
+    return max(300, scan_interval * 5)
+
+
+def _watchdog_loop():
+    """后台 watchdog 线程：周期性调用内部健康检查，持续关键 unhealthy 超阈值时主动退出。
+    关键故障类型：数据库不可访问、调度器未运行、周期扫描任务丢失、最近扫描超时。
+    退出前输出明确日志，使用 os._exit(1) 确保非 0 退出码让 Docker 重启容器。"""
+    global _watchdog_first_unhealthy_time, _watchdog_consecutive_unhealthy_count
+
+    # 首次延迟：给系统足够的启动缓冲时间
+    time.sleep(60)
+
+    while _watchdog_enabled:
+        try:
+            check_interval = max(15, int(load_config().get('scan_interval', 60)) // 2)
+        except Exception:
+            check_interval = 30
+
+        try:
+            result, healthy = health_check()
+        except Exception as e:
+            print(f"[WATCHDOG] 健康检查执行异常: {e}", flush=True)
+            time.sleep(check_interval)
+            continue
+
+        # 判断是否存在关键故障
+        critical_fails = []
+        for check_name in CRITICAL_CHECKS:
+            check_info = result.get('checks', {}).get(check_name)
+            if check_info and check_info.get('status') == 'fail':
+                critical_fails.append(check_name)
+
+        if critical_fails:
+            now = datetime.now()
+            if _watchdog_first_unhealthy_time is None:
+                _watchdog_first_unhealthy_time = now
+            _watchdog_consecutive_unhealthy_count += 1
+
+            duration = (now - _watchdog_first_unhealthy_time).total_seconds()
+            threshold = _get_watchdog_threshold()
+
+            print(f"[WATCHDOG] 关键 unhealthy 持续 {duration:.0f}s / 阈值 {threshold}s "
+                  f"(连续 {_watchdog_consecutive_unhealthy_count} 次), "
+                  f"失败检查: {critical_fails}", flush=True)
+
+            if duration >= threshold:
+                print(f"[WATCHDOG] 关键 unhealthy 已持续 {duration:.0f}s，超过阈值 {threshold}s，主动退出进程", flush=True)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(1)
+        else:
+            # 健康恢复，清零故障累计
+            if _watchdog_consecutive_unhealthy_count > 0:
+                print(f"[WATCHDOG] 健康恢复，重置故障累计 "
+                      f"(之前连续 {_watchdog_consecutive_unhealthy_count} 次 unhealthy)", flush=True)
+            _watchdog_first_unhealthy_time = None
+            _watchdog_consecutive_unhealthy_count = 0
+
+        time.sleep(check_interval)
+
+
 # ==================== Flask 路由 ====================
+
+@app.route('/healthz')
+def api_healthz():
+    """健康检查接口：返回结构化 JSON，unhealthy 时返回 HTTP 503"""
+    result, healthy = health_check()
+    status_code = 200 if healthy else 503
+    return jsonify(result), status_code
+
 
 @app.route('/')
 def index():
@@ -436,6 +619,11 @@ def main():
     )
     scheduler.start()
     print(f"[SCHEDULER] 定时采集已启动，间隔 {interval} 秒")
+
+    # 启动自愈 watchdog 后台线程
+    watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name='watchdog')
+    watchdog_thread.start()
+    print(f"[WATCHDOG] 自愈 watchdog 已启动，阈值 {_get_watchdog_threshold()}s (max(300, 5×{interval}))")
 
     # 启动 Flask
     print("[WEB] 启动 Web 服务 http://127.0.0.1:5000")

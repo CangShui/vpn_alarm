@@ -16,3 +16,4 @@ vpn_alarm.db
 docker-compose.yml
 Dockerfile
 .dockerignore
+GeoLite2-City.mmdb
