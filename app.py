@@ -114,6 +114,7 @@ def notify_event(event_type, detail, server_name=''):
         msg = f"<b>VPN 监控告警</b>\n类型: {event_type}\n服务器: {server_name}\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n详情: {detail}"
         ok, info = send_telegram(tg.get('token'), tg.get('chat_id'), msg)
         messages.append(f"Telegram: {info}")
+        print(f"[NOTIFY] Telegram | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
 
     # Webhook
     wh = notif.get('webhook', {})
@@ -121,6 +122,7 @@ def notify_event(event_type, detail, server_name=''):
         msg = f"[{event_type}] {server_name}: {detail}"
         ok, info = send_webhook(wh, msg)
         messages.append(f"Webhook: {info}")
+        print(f"[NOTIFY] Webhook | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
 
     return messages
 
@@ -613,15 +615,19 @@ def api_test_notification():
     if tg.get('enabled'):
         ok, info = send_telegram(tg.get('token'), tg.get('chat_id'), test_msg)
         results['telegram'] = {'ok': ok, 'message': info}
+        print(f"[NOTIFY-TEST] Telegram | {'成功' if ok else '失败'}: {info}", flush=True)
     else:
         results['telegram'] = {'ok': False, 'message': 'Telegram 通知未启用'}
+        print(f"[NOTIFY-TEST] Telegram | 跳过: 通知未启用", flush=True)
 
     wh = notif.get('webhook', {})
     if wh.get('enabled'):
         ok, info = send_webhook(wh, test_msg)
         results['webhook'] = {'ok': ok, 'message': info}
+        print(f"[NOTIFY-TEST] Webhook | {'成功' if ok else '失败'}: {info}", flush=True)
     else:
         results['webhook'] = {'ok': False, 'message': 'Webhook 通知未启用'}
+        print(f"[NOTIFY-TEST] Webhook | 跳过: 通知未启用", flush=True)
 
     return jsonify({'ok': True, 'results': results})
 
