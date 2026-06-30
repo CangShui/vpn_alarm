@@ -29,7 +29,7 @@ wget https://raw.githubusercontent.com/CangShui/vpn_alarm/main/config.json
 下载 `GeoLite2-City.mmdb` 到该目录（可选，用于城市级 IP 归属地解析）:
 
 ```bash
-wget -O GeoLite2-City.mmdb "https://git.io/GeoLite2-City.mmdb"
+wget -O GeoLite2-City.mmdb "https://raw.githubusercontent.com/CangShui/vpn_alarm/main/GeoLite2-City.mmdb"
 ```
 
 > **注意**: `GeoLite2-City.mmdb` 不提供也不会影响系统核心功能（服务器监控、在线统计、告警推送），仅城市级 IP 解析不可用。该文件需遵循 [MaxMind GeoLite2 EULA](https://www.maxmind.com/en/geolite2/eula)。
