@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vpn_alarm.db')
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'vpn_alarm.db')
 
 
 def get_connection():
@@ -16,7 +16,8 @@ def get_connection():
 
 
 def init_db():
-    """初始化数据库表"""
+    """初始化数据库表（确保父目录存在）"""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_connection()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS scan_records (

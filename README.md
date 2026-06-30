@@ -76,7 +76,7 @@ docker compose up -d
 
 首次 `docker compose up -d` 启动后，以下文件/目录将在宿主机部署目录自动生成：
 
-- `vpn_alarm.db` — SQLite 数据库文件（表结构自动初始化，初始无历史数据）
+- `data/vpn_alarm.db` — SQLite 数据库文件（表结构自动初始化，初始无历史数据）
 - `logs/` — 日志目录
   - `logs/stdout.log` — 应用业务日志（采集记录、事件检测、调度信息等）
   - `logs/stderr.log` — Flask/Werkzeug 访问日志和错误信息

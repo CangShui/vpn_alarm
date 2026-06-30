@@ -4,7 +4,7 @@ __pycache__/
 *.pyo
 
 # Database (auto-created on first run)
-vpn_alarm.db
+data/
 
 # Logs (auto-created on first run)
 stdout.log
