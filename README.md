@@ -72,6 +72,30 @@ docker compose up -d
 
 > 注意: 如需使用 SSH 密钥认证，请将密钥文件放在部署目录并通过 volumes 挂载到容器内。
 
+## 数据库与日志
+
+首次 `docker compose up -d` 启动后，以下文件/目录将在宿主机部署目录自动生成：
+
+- `vpn_alarm.db` — SQLite 数据库文件（表结构自动初始化，初始无历史数据）
+- `logs/` — 日志目录
+  - `logs/stdout.log` — 应用业务日志（采集记录、事件检测、调度信息等）
+  - `logs/stderr.log` — Flask/Werkzeug 访问日志和错误信息
+
+> 以上文件均通过 `docker-compose.yml` 的 volumes 挂载实现持久化，容器重启不会丢失数据。
+
+### 常用查看命令
+
+```bash
+# 实时跟踪业务日志
+tail -f logs/stdout.log
+
+# 查看最近 50 行访问日志
+tail -50 logs/stderr.log
+
+# 搜索特定服务器日志
+grep "服务器名称" logs/stdout.log
+```
+
 ---
 
 ## 许可说明

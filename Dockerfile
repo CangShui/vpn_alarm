@@ -2,6 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# 创建日志目录（容器启动时 stdout/stderr 会写入此处）
+RUN mkdir -p /app/logs
+
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

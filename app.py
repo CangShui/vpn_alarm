@@ -398,6 +398,12 @@ def api_resolver_status():
 def main():
     global scheduler
 
+    # 将 stdout / stderr 重定向到日志文件，配合 docker compose 挂载实现持久化
+    log_dir = '/app/logs'
+    os.makedirs(log_dir, exist_ok=True)
+    sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'a', buffering=1)
+    sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'a', buffering=1)
+
     print("=" * 60)
     print("  VPN 在线监控系统 v1.0")
     print("=" * 60)
