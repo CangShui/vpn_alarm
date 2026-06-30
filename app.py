@@ -99,7 +99,7 @@ def _format_ip_location(ip):
         val = str(geo.get(key, '')).strip()
         if val and val != '-':
             parts.append(val)
-    return ' / '.join(parts) if parts else '未知地区'
+    return ' | '.join(parts) if parts else '未知地区'
 
 
 def notify_event(event_type, detail, server_name=''):
