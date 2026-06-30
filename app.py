@@ -41,7 +41,7 @@ _watchdog_consecutive_unhealthy_count = 0  # 连续关键 unhealthy 次数
 _watchdog_enabled = True  # 控制 watchdog 线程启停（测试用）
 
 # 会导致进程主动退出的关键健康检查项
-CRITICAL_CHECKS = {'database', 'scheduler', 'scan_job', 'last_scan'}
+CRITICAL_CHECKS = {'database', 'scheduler', 'scan_job', 'last_scan', 'status_page', 'api_status'}
 
 
 def _normalize_client_details(raw_details):
@@ -357,7 +357,7 @@ def _get_watchdog_threshold():
 
 def _watchdog_loop():
     """后台 watchdog 线程：周期性调用内部健康检查，持续关键 unhealthy 超阈值时主动退出。
-    关键故障类型：数据库不可访问、调度器未运行、周期扫描任务丢失、最近扫描超时。
+    关键故障类型：数据库不可访问、调度器未运行、周期扫描任务丢失、最近扫描超时、/status 页面渲染异常、/api/status 接口异常。
     退出前输出明确日志，使用 os._exit(1) 确保非 0 退出码让 Docker 重启容器。"""
     global _watchdog_first_unhealthy_time, _watchdog_consecutive_unhealthy_count
 
