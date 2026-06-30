@@ -297,6 +297,46 @@ def health_check():
         }
         healthy = False
 
+    # 6. 用户路径检查：/status 页面可渲染
+    try:
+        with app.test_client() as client:
+            resp = client.get('/status')
+            if resp.status_code == 200:
+                checks['status_page'] = {'status': 'ok', 'type': 'user_path'}
+            else:
+                checks['status_page'] = {'status': 'fail', 'type': 'user_path',
+                                         'error': f'/status 返回 HTTP {resp.status_code}'}
+                healthy = False
+    except Exception as e:
+        checks['status_page'] = {'status': 'fail', 'type': 'user_path', 'error': str(e)}
+        healthy = False
+
+    # 7. 用户路径检查：/api/status 可返回正确数据
+    try:
+        with app.test_client() as client:
+            resp = client.get('/api/status')
+            if resp.status_code == 200:
+                data = resp.get_json()
+                if data and data.get('ok'):
+                    checks['api_status'] = {'status': 'ok', 'type': 'user_path'}
+                else:
+                    checks['api_status'] = {'status': 'fail', 'type': 'user_path',
+                                            'error': f'/api/status 返回异常数据: {data}'}
+                    healthy = False
+            else:
+                checks['api_status'] = {'status': 'fail', 'type': 'user_path',
+                                        'error': f'/api/status 返回 HTTP {resp.status_code}'}
+                healthy = False
+    except Exception as e:
+        checks['api_status'] = {'status': 'fail', 'type': 'user_path', 'error': str(e)}
+        healthy = False
+
+    # 为已有内部检查项补充 type 标记
+    _internal_check_names = {'flask', 'database', 'scheduler', 'scan_job', 'last_scan'}
+    for check_name in checks:
+        if 'type' not in checks[check_name]:
+            checks[check_name]['type'] = 'internal' if check_name in _internal_check_names else 'user_path'
+
     return {
         'status': 'healthy' if healthy else 'unhealthy',
         'checks': checks,
