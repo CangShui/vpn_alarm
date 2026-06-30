@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}历史记录{% endblock %}
+{% block head %}
+<style>
+.tab-nav { display: flex; border-bottom: 2px solid #ddd; margin-bottom: 16px; }
+.tab-btn { padding: 10px 24px; border: none; background: none; cursor: pointer;
+    font-size: 15px; font-weight: 500; color: #666; border-bottom: 2px solid transparent;
+    margin-bottom: -2px; transition: color 0.2s, border-color 0.2s; outline: none; }
+.tab-btn:hover { color: #3498db; }
+.tab-btn.active { color: #3498db; border-bottom-color: #3498db; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.pagination { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.pagination button { padding: 6px 14px; border: 1px solid #ccc; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 13px; }
+.pagination button:hover:not(:disabled) { background: #3498db; color: #fff; border-color: #3498db; }
+.pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.pagination select { padding: 4px 8px; border-radius: 4px; border: 1px solid #ccc; font-size: 13px; }
+.pagination .page-info { font-size: 13px; color: #666; }
+.loading-text { text-align: center; padding: 20px; color: #888; font-size: 14px; }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="section">
+    <h2>历史记录</h2>
+    <div class="tab-nav">
+        <button class="tab-btn active" data-tab="scans" onclick="switchTab('scans')">扫描历史</button>
+        <button class="tab-btn" data-tab="events" onclick="switchTab('events')">事件日志</button>
+    </div>
+
+    <!-- 扫描历史面板 -->
+    <div id="tab-scans" class="tab-panel active">
+        <div id="scans-table-container" class="loading-text">加载中...</div>
+        <div id="scans-pagination" class="pagination"></div>
+    </div>
+
+    <!-- 事件日志面板 -->
+    <div id="tab-events" class="tab-panel">
+        <div id="events-table-container" class="loading-text">加载中...</div>
+        <div id="events-pagination" class="pagination"></div>
+    </div>
+</div>
+
+<script>
+// 每个标签页的独立分页状态
+var tabState = {
+    scans: { page: 1, page_size: 50, total: 0 },
+    events: { page: 1, page_size: 50, total: 0 }
+};
+var currentTab = 'scans';
+
+function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab-btn').forEach(function(b) {
+        b.classList.toggle('active', b.getAttribute('data-tab') === tab);
+    });
+    document.querySelectorAll('.tab-panel').forEach(function(p) {
+        p.classList.toggle('active', p.id === 'tab-' + tab);
+    });
+    loadTabData(tab);
+}
+
+function loadTabData(tab) {
+    var state = tabState[tab];
+    var url = tab === 'scans' ? '/api/scans' : '/api/events';
+    var containerId = tab + '-table-container';
+    var paginationId = tab + '-pagination';
+
+    document.getElementById(containerId).innerHTML = '<div class="loading-text">加载中...</div>';
+    // 保留分页区域，显示加载状态
+    renderPagination(tab, true);
+
+    var query = url + '?page=' + state.page + '&page_size=' + state.page_size;
+    fetch(query)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.ok) throw new Error(data.error || '请求失败');
+            state.total = data.total;
+            // 同步服务端修正后的页码（越界自动修正）
+            state.page = data.page;
+            renderTable(tab, data.items);
+            renderPagination(tab, false);
+        })
+        .catch(function(e) {
+            document.getElementById(containerId).innerHTML =
+                '<div class="card" style="text-align:center;color:red;">加载失败: ' + e.message + '</div>';
+            renderPagination(tab, false);
+        });
+}
+
+function renderTable(tab, items) {
+    var containerId = tab + '-table-container';
+    if (!items || items.length === 0) {
+        document.getElementById(containerId).innerHTML =
+            '<div class="card" style="text-align:center;color:#999;"><p>暂无记录</p></div>';
+        return;
+    }
+
+    var html = '<div style="overflow-x:auto;"><table class="data-table">';
+    if (tab === 'scans') {
+        html += '<thead><tr><th>ID</th><th>服务器</th><th>类型</th><th>采集时间</th><th>在线数</th><th>状态</th><th>耗时(ms)</th><th>错误信息</th><th>客户端 IP</th></tr></thead><tbody>';
+        items.forEach(function(s) {
+            html += '<tr>';
+            html += '<td>' + s.id + '</td>';
+            html += '<td>' + esc(s.server_name) + '</td>';
+            html += '<td>' + esc(s.server_type) + '</td>';
+            html += '<td>' + esc(s.scan_time) + '</td>';
+            html += '<td>' + s.online_count + '</td>';
+            html += '<td><span class="status-badge ' + (s.status === 'success' ? 'badge-ok' : 'badge-err') + '">' + esc(s.status) + '</span></td>';
+            html += '<td>' + s.duration_ms + '</td>';
+            html += '<td class="error-text" style="max-width:200px;word-break:break-all;">' + esc(s.error_message) + '</td>';
+            html += '<td style="max-width:250px;word-break:break-all;font-size:12px;">' + esc(s.client_ips) + '</td>';
+            html += '</tr>';
+        });
+    } else {
+        html += '<thead><tr><th>ID</th><th>时间</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th></tr></thead><tbody>';
+        items.forEach(function(e) {
+            html += '<tr>';
+            html += '<td>' + e.id + '</td>';
+            html += '<td>' + esc(e.event_time) + '</td>';
+            html += '<td><span class="event-type">' + esc(e.event_type) + '</span></td>';
+            html += '<td>' + esc(e.server_name) + '</td>';
+            html += '<td>' + esc(e.detail) + '</td>';
+            html += '<td>' + (e.notified ? '是' : '否') + '</td>';
+            html += '</tr>';
+        });
+    }
+    html += '</tbody></table></div>';
+    document.getElementById(containerId).innerHTML = html;
+}
+
+function renderPagination(tab, loading) {
+    var state = tabState[tab];
+    var paginationId = tab + '-pagination';
+
+    if (loading) {
+        document.getElementById(paginationId).innerHTML =
+            '<span class="loading-text" style="padding:6px 0;">加载中...</span>';
+        return;
+    }
+
+    // 无记录时只显示提示，不展示分页控件
+    if (state.total === 0) {
+        document.getElementById(paginationId).innerHTML =
+            '<span class="page-info" style="color:#999;">暂无记录</span>';
+        // 同步更新容器也为空状态（若未通过 renderTable 设置）
+        var containerId = tab + '-table-container';
+        var container = document.getElementById(containerId);
+        if (container && (container.innerHTML.indexOf('暂无记录') === -1 && container.innerHTML.indexOf('data-table') === -1)) {
+            container.innerHTML = '<div class="card" style="text-align:center;color:#999;"><p>暂无记录</p></div>';
+        }
+        return;
+    }
+
+    var totalPages = Math.ceil(state.total / state.page_size);
+    if (totalPages < 1) totalPages = 1;
+
+    var html = '';
+
+    html += '<span class="page-info">共 ' + state.total + ' 条，第 ' + state.page + '/' + totalPages + ' 页</span> ';
+
+    html += '<button ' + (state.page <= 1 ? 'disabled' : '') + ' onclick="goPage(\'' + tab + '\', 1)">首页</button>';
+    html += '<button ' + (state.page <= 1 ? 'disabled' : '') + ' onclick="goPage(\'' + tab + '\', ' + (state.page - 1) + ')">上一页</button>';
+    html += '<button ' + (state.page >= totalPages ? 'disabled' : '') + ' onclick="goPage(\'' + tab + '\', ' + (state.page + 1) + ')">下一页</button>';
+    html += '<button ' + (state.page >= totalPages ? 'disabled' : '') + ' onclick="goPage(\'' + tab + '\', ' + totalPages + ')">末页</button>';
+
+    html += ' <select onchange="changePageSize(\'' + tab + '\', this.value)">';
+    [20, 50, 100, 200].forEach(function(ps) {
+        html += '<option value="' + ps + '"' + (state.page_size === ps ? ' selected' : '') + '>每页 ' + ps + ' 条</option>';
+    });
+    html += '</select>';
+
+    document.getElementById(paginationId).innerHTML = html;
+}
+
+function goPage(tab, page) {
+    var state = tabState[tab];
+    if (state.total === 0) {
+        state.page = 1;
+        loadTabData(tab);
+        return;
+    }
+    var totalPages = Math.ceil(state.total / state.page_size);
+    if (totalPages < 1) totalPages = 1;
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+    state.page = page;
+    loadTabData(tab);
+}
+
+function changePageSize(tab, size) {
+    var state = tabState[tab];
+    state.page_size = parseInt(size) || 50;
+    state.page = 1;  // 切换每页条数总是回到第一页
+    state.total = 0; // 临时置零避免跳页闪烁（加载后会更新）
+    loadTabData(tab);
+}
+
+function esc(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// 初始加载
+loadTabData('scans');
+</script>
+
+{% endblock %}

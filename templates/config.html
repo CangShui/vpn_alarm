@@ -1,0 +1,323 @@
+{% extends "base.html" %}
+{% block title %}系统配置{% endblock %}
+{% block content %}
+
+<div class="section">
+    <h2>系统配置</h2>
+    <p style="font-size:13px; color:#888;">修改配置后点击保存，所有字段按真实值明文保存。</p>
+
+    <form id="config-form">
+        <!-- 扫描设置 -->
+        <div class="card">
+            <h3>扫描设置</h3>
+            <div class="form-row">
+                <label>扫描间隔 (秒):</label>
+                <input type="number" name="scan_interval" value="{{ config.scan_interval }}" min="10" max="3600" style="width:120px;">
+            </div>
+            <div class="form-row">
+                <label>告警窗口 (秒):</label>
+                <input type="number" name="connection_alert_window" value="{{ config.connection_alert_window }}" min="1" max="86400" style="width:120px;">
+                <span style="font-size:12px; color:#888;">仅对最近 N 秒内新连接的客户端触发告警</span>
+            </div>
+            <div class="form-row">
+                <label>状态页刷新间隔 (秒):</label>
+                <input type="number" name="status_refresh_interval" value="{{ config.status_refresh_interval }}" min="3" max="300" style="width:120px;">
+                <span style="font-size:12px; color:#888;">在线状态页自动刷新间隔</span>
+            </div>
+            <div class="form-row">
+                <label>扫描记录保留条数:</label>
+                <input type="number" name="scan_history_retention" value="{{ config.scan_history_retention }}" min="100" max="1000000" style="width:150px;">
+                <span style="font-size:12px; color:#888;">超出上限自动删除最旧的扫描记录</span>
+            </div>
+            <div class="form-row">
+                <label>事件日志保留条数:</label>
+                <input type="number" name="event_history_retention" value="{{ config.event_history_retention }}" min="100" max="1000000" style="width:150px;">
+                <span style="font-size:12px; color:#888;">超出上限自动删除最旧的事件日志</span>
+            </div>
+        </div>
+
+        <!-- 服务器列表 -->
+        <div class="card">
+            <h3>服务器配置</h3>
+            <div id="servers-container">
+                {% for srv in config.servers %}
+                <div class="server-config" data-index="{{ loop.index0 }}" style="border:1px solid #ddd; border-radius:6px; padding:12px; margin-bottom:10px; background:#fafafa;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <strong style="font-size:14px;">服务器 #<span class="server-num">{{ loop.index }}</span></strong>
+                        <button type="button" onclick="deleteServer(this)" style="padding:4px 12px; font-size:12px; cursor:pointer; background:#e74c3c; color:#fff; border:none; border-radius:3px;">删除</button>
+                    </div>
+                    <div class="form-row">
+                        <label>名称:</label>
+                        <input type="text" name="server_name" value="{{ srv.name }}" style="width:200px;">
+                    </div>
+                    <div class="form-row">
+                        <label>主机:</label>
+                        <input type="text" name="server_host" value="{{ srv.host }}" style="width:180px;">
+                        <label>端口:</label>
+                        <input type="number" name="server_port" value="{{ srv.port }}" style="width:80px;">
+                    </div>
+                    <div class="form-row">
+                        <label>用户名:</label>
+                        <input type="text" name="server_username" value="{{ srv.username }}" style="width:150px;">
+                        <label>密码:</label>
+                        <input type="password" name="server_password" value="{{ srv.password }}" style="width:180px;" autocomplete="off">
+                    </div>
+                    <div class="form-row">
+                        <label>SSH密钥路径:</label>
+                        <input type="text" name="server_ssh_key_path" value="{{ srv.ssh_key_path }}" placeholder="例: ~/.ssh/id_rsa" style="width:250px;">
+                        <label>密钥密码:</label>
+                        <input type="password" name="server_ssh_key_passphrase" value="{{ srv.ssh_key_passphrase }}" style="width:150px;" autocomplete="off">
+                    </div>
+                    <div class="form-row">
+                        <label>命令:</label>
+                        <input type="text" name="server_command" value="{{ srv.command }}" style="width:500px;">
+                    </div>
+                    <div class="form-row">
+                        <label>类型:</label>
+                        <select name="server_type">
+                            <option value="ikev2" {% if srv.type == 'ikev2' %}selected{% endif %}>IKEv2 (ipsec statusall)</option>
+                            <option value="openvpn" {% if srv.type == 'openvpn' %}selected{% endif %}>OpenVPN (status log)</option>
+                            <option value="generic" {% if srv.type == 'generic' %}selected{% endif %}>通用</option>
+                        </select>
+                        <label>启用:</label>
+                        <input type="checkbox" name="server_enabled" {% if srv.enabled %}checked{% endif %}>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div style="margin-top:8px;">
+                <button type="button" onclick="addServer()" style="padding:8px 20px; font-size:14px; cursor:pointer; background:#27ae60; color:#fff; border:none; border-radius:4px;">+ 添加服务器</button>
+            </div>
+        </div>
+
+        <!-- 城市解析配置 -->
+        <div class="card">
+            <h3>城市解析配置</h3>
+            <div class="form-row">
+                <label>本地文件路径:</label>
+                <input type="text" name="geo_file_path" value="{{ config.geo_file_path }}" style="width:400px;" placeholder="留空使用默认 GeoLite2-City.mmdb">
+                <span style="font-size:12px; color:#888;">支持 MaxMind .mmdb 格式，绝对路径或相对于项目目录的文件名</span>
+            </div>
+        </div>
+
+        <!-- 通知配置 -->
+        <div class="card">
+            <h3>Telegram 通知</h3>
+            <div class="form-row">
+                <label>启用:</label>
+                <input type="checkbox" id="tg-enabled" name="tg_enabled" {% if config.notifications.telegram.enabled %}checked{% endif %}>
+            </div>
+            <div class="form-row">
+                <label>Bot Token:</label>
+                <input type="text" name="tg_token" value="{{ config.notifications.telegram.token }}" style="width:400px;">
+            </div>
+            <div class="form-row">
+                <label>Chat ID:</label>
+                <input type="text" name="tg_chat_id" value="{{ config.notifications.telegram.chat_id }}" style="width:200px;">
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Webhook 通知</h3>
+            <div class="form-row">
+                <label>启用:</label>
+                <input type="checkbox" id="wh-enabled" name="wh_enabled" {% if config.notifications.webhook.enabled %}checked{% endif %}>
+            </div>
+            <div class="form-row">
+                <label>URL:</label>
+                <input type="text" name="wh_url" value="{{ config.notifications.webhook.url }}" style="width:400px;">
+            </div>
+            <div class="form-row">
+                <label>Content-Type:</label>
+                <input type="text" name="wh_content_type" value="{{ config.notifications.webhook.content_type }}" style="width:200px;">
+            </div>
+            <div class="form-row">
+                <label>Header Key:</label>
+                <input type="text" name="wh_header_key" value="{% for k in config.notifications.webhook.headers %}{{ k }}{% endfor %}" style="width:200px;">
+                <label>Header Value:</label>
+                <input type="text" name="wh_header_value" value="{% for k, v in config.notifications.webhook.headers.items() %}{{ v }}{% endfor %}" style="width:280px;">
+            </div>
+            <div class="form-row">
+                <label>Body 模板:</label>
+                <input type="text" name="wh_body_template" value="{{ config.notifications.webhook.body_template }}" style="width:500px;">
+                <span style="font-size:12px; color:#888;">使用 {{ '{{message}}' }} 作为消息占位符</span>
+            </div>
+        </div>
+
+        <div style="margin-top:16px;">
+            <button type="button" onclick="saveConfig()" style="padding:10px 24px; font-size:15px; cursor:pointer; background:#3498db; color:#fff; border:none; border-radius:4px;">保存配置</button>
+            <button type="button" onclick="testNotification()" style="padding:10px 24px; font-size:15px; cursor:pointer; background:#e67e22; color:#fff; border:none; border-radius:4px; margin-left:10px;">测试通知</button>
+            <span id="config-hint" style="margin-left:12px; font-size:14px;"></span>
+        </div>
+    </form>
+</div>
+
+<script>
+// ---- 动态服务器管理 ----
+function addServer() {
+    var container = document.getElementById('servers-container');
+    var count = container.querySelectorAll('.server-config').length;
+    var html = '<div class="server-config" style="border:1px solid #ddd; border-radius:6px; padding:12px; margin-bottom:10px; background:#fafafa;">';
+    html += '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">';
+    html += '<strong style="font-size:14px;">服务器 #<span class="server-num">' + (count + 1) + '</span></strong>';
+    html += '<button type="button" onclick="deleteServer(this)" style="padding:4px 12px; font-size:12px; cursor:pointer; background:#e74c3c; color:#fff; border:none; border-radius:3px;">删除</button>';
+    html += '</div>';
+    html += '<div class="form-row"><label>名称:</label><input type="text" name="server_name" placeholder="例如: 服务器C" style="width:200px;"></div>';
+    html += '<div class="form-row"><label>主机:</label><input type="text" name="server_host" placeholder="192.168.1.100" style="width:180px;"> <label>端口:</label><input type="number" name="server_port" value="22" style="width:80px;"></div>';
+    html += '<div class="form-row"><label>用户名:</label><input type="text" name="server_username" value="root" style="width:150px;"> <label>密码:</label><input type="password" name="server_password" placeholder="输入密码" style="width:180px;" autocomplete="off"></div>';
+    html += '<div class="form-row"><label>SSH密钥路径:</label><input type="text" name="server_ssh_key_path" placeholder="例: ~/.ssh/id_rsa" style="width:250px;"> <label>密钥密码:</label><input type="password" name="server_ssh_key_passphrase" placeholder="密钥密码(如有)" style="width:150px;" autocomplete="off"></div>';
+    html += '<div class="form-row"><label>命令:</label><input type="text" name="server_command" placeholder="例如: cat /var/log/openvpn_status.log" style="width:500px;"></div>';
+    html += '<div class="form-row"><label>类型:</label><select name="server_type"><option value="ikev2">IKEv2 (ipsec statusall)</option><option value="openvpn">OpenVPN (status log)</option><option value="generic" selected>通用</option></select> <label>启用:</label><input type="checkbox" name="server_enabled" checked></div>';
+    html += '</div>';
+    container.insertAdjacentHTML('beforeend', html);
+    renumberServers();
+}
+
+function deleteServer(btn) {
+    var card = btn.closest('.server-config');
+    if (card) {
+        card.remove();
+        renumberServers();
+    }
+}
+
+function renumberServers() {
+    var cards = document.querySelectorAll('#servers-container .server-config');
+    cards.forEach(function(card, idx) {
+        var numSpan = card.querySelector('.server-num');
+        if (numSpan) numSpan.textContent = idx + 1;
+    });
+}
+
+function saveConfig() {
+    var hint = document.getElementById('config-hint');
+    hint.textContent = '保存中...';
+    hint.style.color = '#666';
+
+    try {
+        // 构建配置对象
+        var config = {
+            scan_interval: parseInt(document.querySelector('input[name="scan_interval"]').value) || 60,
+            connection_alert_window: parseInt(document.querySelector('input[name="connection_alert_window"]').value) || 300,
+            status_refresh_interval: parseInt(document.querySelector('input[name="status_refresh_interval"]').value) || 5,
+            scan_history_retention: parseInt(document.querySelector('input[name="scan_history_retention"]').value) || 10000,
+            event_history_retention: parseInt(document.querySelector('input[name="event_history_retention"]').value) || 5000,
+            geo_file_path: document.querySelector('input[name="geo_file_path"]').value.trim(),
+            servers: [],
+            notifications: {
+                telegram: {
+                    enabled: document.getElementById('tg-enabled').checked,
+                    token: document.querySelector('input[name="tg_token"]').value,
+                    chat_id: document.querySelector('input[name="tg_chat_id"]').value
+                },
+                webhook: {
+                    enabled: document.getElementById('wh-enabled').checked,
+                    url: document.querySelector('input[name="wh_url"]').value,
+                    content_type: document.querySelector('input[name="wh_content_type"]').value,
+                    headers: {},
+                    body_template: document.querySelector('input[name="wh_body_template"]').value
+                }
+            }
+        };
+
+        // Webhook headers
+        var hk = document.querySelector('input[name="wh_header_key"]').value.trim();
+        var hv = document.querySelector('input[name="wh_header_value"]').value.trim();
+        if (hk && hv) {
+            config.notifications.webhook.headers[hk] = hv;
+        }
+
+        // 从现有服务器配置中收集（基于实际 DOM 中的服务器卡片）
+        var serverCards = document.querySelectorAll('#servers-container .server-config');
+        serverCards.forEach(function(card) {
+            var nameEl = card.querySelector('input[name="server_name"]');
+            var hostEl = card.querySelector('input[name="server_host"]');
+            var portEl = card.querySelector('input[name="server_port"]');
+            var userEl = card.querySelector('input[name="server_username"]');
+            var passEl = card.querySelector('input[name="server_password"]');
+            var keyPathEl = card.querySelector('input[name="server_ssh_key_path"]');
+            var keyPassEl = card.querySelector('input[name="server_ssh_key_passphrase"]');
+            var cmdEl = card.querySelector('input[name="server_command"]');
+            var typeEl = card.querySelector('select[name="server_type"]');
+            var enEl = card.querySelector('input[name="server_enabled"]');
+
+            if (nameEl && hostEl) {
+                config.servers.push({
+                    name: nameEl.value,
+                    host: hostEl.value,
+                    port: parseInt(portEl ? portEl.value : 22) || 22,
+                    username: userEl ? userEl.value : 'root',
+                    password: passEl ? passEl.value : '',
+                    ssh_key_path: keyPathEl ? keyPathEl.value.trim() : '',
+                    ssh_key_passphrase: keyPassEl ? keyPassEl.value : '',
+                    command: cmdEl ? cmdEl.value : '',
+                    type: typeEl ? typeEl.value : 'generic',
+                    enabled: enEl ? enEl.checked : true
+                });
+            }
+        });
+
+        fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.text().then(function(txt) {
+                    throw new Error('HTTP ' + r.status + ': ' + (txt || r.statusText).substring(0, 200));
+                });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (data.ok) {
+                hint.textContent = '保存成功！';
+                hint.style.color = 'green';
+                setTimeout(function(){ location.reload(); }, 1500);
+            } else {
+                hint.textContent = '保存失败: ' + (data.error || '未知错误');
+                hint.style.color = 'red';
+            }
+        })
+        .catch(function(e) {
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'red';
+            console.error('SaveConfig error:', e);
+        });
+    } catch (e) {
+        hint.textContent = '构建请求失败: ' + e.message;
+        hint.style.color = 'red';
+        console.error('SaveConfig build error:', e);
+    }
+}
+
+function testNotification() {
+    var hint = document.getElementById('config-hint');
+    hint.textContent = '发送测试通知...';
+    hint.style.color = '#666';
+
+    fetch('/api/test-notification', {method: 'POST'})
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                var parts = [];
+                for (var k in data.results) {
+                    var r = data.results[k];
+                    parts.push(k + ': ' + (r.ok ? '成功' : '失败') + ' - ' + r.message);
+                }
+                hint.textContent = parts.join(' | ');
+                hint.style.color = '#333';
+            } else {
+                hint.textContent = '请求失败';
+                hint.style.color = 'red';
+            }
+        })
+        .catch(e => {
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'red';
+        });
+}
+</script>
+
+{% endblock %}

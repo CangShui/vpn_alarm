@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.github/
+*.md
+test_*.py
+_test_*.py
+_trace_*.py
+_verify_*.py
+stderr.log
+stdout.log
+vpn_alarm.db
+docker-compose.yml
+Dockerfile
+.dockerignore

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VPN 在线监控 - {% block title %}{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="header">
+        <h1>VPN 在线监控系统</h1>
+        <nav>
+            <a href="/status" class="nav-link">当前状态</a>
+            <a href="/history" class="nav-link">历史记录</a>
+            <a href="/config" class="nav-link">系统配置</a>
+        </nav>
+    </div>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+    <div class="footer">
+        VPN 监控系统 v1.0 | 当前时间: {{ now }}
+    </div>
+</body>
+</html>

@@ -1,0 +1,50 @@
+{
+  "servers": [
+    {
+      "command": "",
+      "enabled": false,
+      "host": "",
+      "name": "示例服务器 (IKEv2)",
+      "password": "",
+      "port": 22,
+      "ssh_key_passphrase": "",
+      "ssh_key_path": "",
+      "type": "ikev2",
+      "username": ""
+    },
+    {
+      "command": "",
+      "enabled": false,
+      "host": "",
+      "name": "示例服务器 (OpenVPN)",
+      "password": "",
+      "port": 22,
+      "ssh_key_passphrase": "",
+      "ssh_key_path": "",
+      "type": "openvpn",
+      "username": ""
+    }
+  ],
+  "scan_interval": 60,
+  "connection_alert_window": 300,
+  "status_refresh_interval": 5,
+  "geo_file_path": "GeoLite2-City.mmdb",
+  "scan_history_retention": 10000,
+  "event_history_retention": 5000,
+  "notifications": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "chat_id": ""
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "",
+      "content_type": "application/json",
+      "headers": {
+        "x-webhook-secret": ""
+      },
+      "body_template": "{\"title\": \"VPN监控\", \"msg\": \"{{message}}\"}"
+    }
+  }
+}
