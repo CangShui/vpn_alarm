@@ -18,7 +18,7 @@ from database import init_db, save_scan_record, save_event, get_latest_scan_per_
     get_recent_scans, get_recent_events, get_known_ips, db_ping, get_db_stats, \
     get_scans_paginated, get_events_paginated, prune_all
 from collector import collect_server
-from geo_resolver import init_resolvers, resolve_ips, get_resolver_status
+from geo_resolver import init_resolvers, resolve_ip, resolve_ips, get_resolver_status
 from notifier import send_telegram, send_webhook
 from config_manager import load_config, save_config, get_safe_config
 
@@ -85,6 +85,21 @@ def _format_connection_age(seconds):
     if seconds is None:
         return '连接时间未知'
     return f'已连接 {seconds} 秒'
+
+
+def _format_ip_location(ip):
+    """将 resolve_ip 结果转换为通知用的地点文本。
+    优先组合 城市 / 地区 / 国家 中非空非 '-' 的字段，全部无效时返回 '未知地区'。"""
+    try:
+        geo = resolve_ip(ip)
+    except Exception:
+        return '未知地区'
+    parts = []
+    for key in ('city', 'region', 'country'):
+        val = str(geo.get(key, '')).strip()
+        if val and val != '-':
+            parts.append(val)
+    return ' / '.join(parts) if parts else '未知地区'
 
 
 def notify_event(event_type, detail, server_name=''):
@@ -172,7 +187,8 @@ def do_scan():
                         continue
                     if session_key in prev_alerted_keys:
                         continue
-                    detail = f"新客户端上线: {detail_item['ip']}，{_format_connection_age(detail_item.get('connected_seconds'))}"
+                    location = _format_ip_location(detail_item['ip'])
+                    detail = f"新客户端上线: {detail_item['ip']}（{location}），{_format_connection_age(detail_item.get('connected_seconds'))}"
                     print(f"  [EVENT] {detail}", flush=True)
                     save_event('new_client_alert', srv_name, detail, notified=1)
                     notify_event('新客户端上线', detail, srv_name)
