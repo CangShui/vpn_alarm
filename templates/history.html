@@ -121,7 +121,7 @@ function renderTable(tab, items) {
             html += '<td>' + esc(e.event_time) + '</td>';
             html += '<td><span class="event-type">' + esc(e.event_type) + '</span></td>';
             html += '<td>' + esc(e.server_name) + '</td>';
-            html += '<td>' + esc(e.detail) + '</td>';
+            html += '<td>' + formatEventDetail(e.event_type, e.detail, e.event_time) + '</td>';
             html += '<td>' + (e.notified ? '是' : '否') + '</td>';
             html += '</tr>';
         });
@@ -195,6 +195,50 @@ function changePageSize(tab, size) {
     state.page = 1;  // 切换每页条数总是回到第一页
     state.total = 0; // 临时置零避免跳页闪烁（加载后会更新）
     loadTabData(tab);
+}
+
+function formatEventDetail(eventType, detail, eventTime) {
+    // 对 new_client_alert 事件尝试解析结构化数据，动态计算连接时长
+    if (eventType === 'new_client_alert' && detail && detail.indexOf('|||') !== -1) {
+        var parts = detail.split('|||');
+        var humanPart = esc(parts[0] || '');
+        var structuredPart = parts[1] || '';
+        try {
+            var data = JSON.parse(structuredPart);
+            var connectedSince = data.connected_since || '';
+            var dynamicAge = formatConnectionAgeDynamic(connectedSince, eventTime);
+            // 用动态时长替换静态时长
+            return humanPart.replace(/已连接 \d+ 秒/, dynamicAge);
+        } catch (e) {
+            // 解析失败，降级为原始 detail
+        }
+    }
+    return esc(detail);
+}
+
+function formatConnectionAgeDynamic(connectedSince, eventTime) {
+    var since = connectedSince || eventTime || '';
+    if (!since) return '连接时间未知';
+    // 时间格式为 'YYYY-MM-DD HH:MM:SS'，转换为 ISO 兼容格式（本地时区）
+    var isoStr = since.replace(' ', 'T');
+    var sinceDate = new Date(isoStr);
+    if (isNaN(sinceDate.getTime())) return '连接时间未知';
+    var diffSeconds = Math.floor((new Date() - sinceDate) / 1000);
+    if (diffSeconds < 0) diffSeconds = 0;
+    return formatSeconds(diffSeconds);
+}
+
+function formatSeconds(totalSeconds) {
+    var days = Math.floor(totalSeconds / 86400);
+    var hours = Math.floor((totalSeconds % 86400) / 3600);
+    var minutes = Math.floor((totalSeconds % 3600) / 60);
+    var seconds = totalSeconds % 60;
+    var parts = [];
+    if (days > 0) parts.push(days + ' 天');
+    if (hours > 0) parts.push(hours + ' 小时');
+    if (minutes > 0) parts.push(minutes + ' 分');
+    if (seconds > 0 || parts.length === 0) parts.push(seconds + ' 秒');
+    return '已连接 ' + parts.join(' ');
 }
 
 function esc(str) {
