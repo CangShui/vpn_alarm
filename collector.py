@@ -391,6 +391,18 @@ def _build_client_detail(ip, connected_since=None, connected_seconds=None, sourc
     }
 
 
+def _is_private_172(ip):
+    """检查 IP 是否落在 172.16.0.0/12 私网段（172.16.x.x - 172.31.x.x）。"""
+    try:
+        parts = ip.split('.')
+        if len(parts) == 4 and parts[0] == '172':
+            second = int(parts[1])
+            return 16 <= second <= 31
+    except (ValueError, IndexError):
+        pass
+    return False
+
+
 def _parse_ikev2(output):
     """
     解析 strongSwan ipsec statusall 输出，提取客户端 IP。
@@ -414,8 +426,9 @@ def _parse_ikev2(output):
     online_count = 0
 
     # 排除非客户端 IP（服务器自身、Docker 网桥、VPN 地址池等）
+    # 172.16.0.0/12 整段由 _is_private_172() 统一过滤
     exclude_starts = ['0.0.0.', '255.255.', '127.0.', '192.168.4.', '192.168.0.',
-                      '172.17.', '172.18.', '10.10.10.']
+                      '10.10.10.']
     exclude_exact = {'0.0.0.0', '255.255.255.255', '127.0.0.1'}
 
     # 解析 "Security Associations (N up, M connecting):" 中的 N
@@ -445,11 +458,13 @@ def _parse_ikev2(output):
         # 如果全部被排除（纯内网场景），回退到最后一个 IP
         candidate_ips = [ip for ip in all_ips_in_line
                          if ip not in exclude_exact
-                         and not any(ip.startswith(p) for p in exclude_starts)]
+                         and not any(ip.startswith(p) for p in exclude_starts)
+                         and not _is_private_172(ip)]
         if candidate_ips:
             client_ip = candidate_ips[-1]
         else:
-            client_ip = all_ips_in_line[-1]
+            # 整行 IP 均在排除范围内（如纯 172.16/12 私网），跳过该行
+            continue
 
         # 计算稳定的 connected_since 时间戳（用于去重，避免每次扫描 marker 变化）
         connected_since = ''
@@ -476,6 +491,8 @@ def _parse_ikev2(output):
         if ip in exclude_exact:
             continue
         if any(ip.startswith(p) for p in exclude_starts):
+            continue
+        if _is_private_172(ip):
             continue
         client_ips.add(ip)
 
