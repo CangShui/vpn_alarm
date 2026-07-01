@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "geo_file_path": "",
     "scan_history_retention": 10000,
     "event_history_retention": 5000,
+    "log_retention_days": 30,
     "notifications": {
         "telegram": {"enabled": False, "token": "", "chat_id": ""},
         "webhook": {"enabled": False, "url": "", "content_type": "application/json",
@@ -42,6 +43,7 @@ def _normalize_config(cfg):
     normalized['geo_file_path'] = str(normalized.get('geo_file_path') or '').strip()
     normalized['scan_history_retention'] = int(normalized.get('scan_history_retention') or 10000)
     normalized['event_history_retention'] = int(normalized.get('event_history_retention') or 5000)
+    normalized['log_retention_days'] = max(1, int(normalized.get('log_retention_days') or 30))
 
     notifications = source.get('notifications') or {}
     default_notifications = _deep_copy_default()['notifications']

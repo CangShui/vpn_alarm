@@ -5,9 +5,10 @@ Flask Web + APScheduler 定时采集 + SQLite 存储
 import json
 import sys
 import os
+import re
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 
@@ -437,6 +438,122 @@ def _watchdog_loop():
         time.sleep(check_interval)
 
 
+# ==================== 日志轮转与自动清理 ====================
+
+LOG_DIR = '/app/logs'
+_ARCHIVE_PATTERN = re.compile(r'^(stdout|stderr)\.(\d{4}-\d{2}-\d{2})\.log$')
+
+
+def _rotate_active_log_files():
+    """启动时轮转：如果 stdout.log / stderr.log 的最后修改日期不是今天，将其归档为 .YYYY-MM-DD.log。
+    必须在重定向 stdout/stderr 之前调用，此时旧文件句柄尚未由本进程持有。"""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    for base_name in ('stdout', 'stderr'):
+        active_path = os.path.join(LOG_DIR, f'{base_name}.log')
+        if not os.path.exists(active_path):
+            continue
+        # 检查文件大小，空文件不归档（可能是新创建的空文件）
+        if os.path.getsize(active_path) == 0:
+            continue
+        mtime = os.path.getmtime(active_path)
+        file_date = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d')
+        if file_date == today:
+            continue  # 已经是今天的日志，无需轮转
+        archive_path = os.path.join(LOG_DIR, f'{base_name}.{file_date}.log')
+        if os.path.exists(archive_path):
+            # 归档文件已存在，直接删除旧文件以避免重复归档
+            os.remove(active_path)
+            print(f"[LOGROTATE] {base_name}.log 的归档 {archive_path} 已存在，删除原文件", flush=True)
+        else:
+            os.rename(active_path, archive_path)
+            print(f"[LOGROTATE] 归档日志: {active_path} → {archive_path}", flush=True)
+
+
+def _cleanup_old_archives():
+    """清理超过保留天数的归档日志文件（不触碰当前活跃的 stdout.log / stderr.log）。"""
+    try:
+        cfg = load_config()
+        retention_days = max(1, int(cfg.get('log_retention_days', 30)))
+    except Exception:
+        retention_days = 30
+
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    deleted_count = 0
+
+    try:
+        for fname in os.listdir(LOG_DIR):
+            match = _ARCHIVE_PATTERN.match(fname)
+            if not match:
+                continue
+            try:
+                file_date = datetime.strptime(match.group(2), '%Y-%m-%d')
+            except ValueError:
+                continue
+            if file_date < cutoff:
+                try:
+                    os.remove(os.path.join(LOG_DIR, fname))
+                    deleted_count += 1
+                    print(f"[LOGROTATE] 已删除过期日志: {fname} (保留 {retention_days} 天)", flush=True)
+                except OSError as e:
+                    print(f"[LOGROTATE] 删除失败: {fname}: {e}", flush=True)
+    except Exception as e:
+        print(f"[LOGROTATE] 清理归档日志时出错: {e}", flush=True)
+
+    if deleted_count > 0:
+        print(f"[LOGROTATE] 本轮共清理 {deleted_count} 个过期归档日志文件", flush=True)
+
+
+def _daily_log_maintenance():
+    """每日日志维护：清理过期归档 + 运行时日志轮转（将当前活跃日志按日归档并重开文件句柄）。"""
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # 先清理过期归档
+    _cleanup_old_archives()
+
+    # 运行时轮转活跃日志（如果当前文件最后修改日期不是今天）
+    for base_name in ('stdout', 'stderr'):
+        active_path = os.path.join(LOG_DIR, f'{base_name}.log')
+        if not os.path.exists(active_path):
+            continue
+        if os.path.getsize(active_path) == 0:
+            continue
+        try:
+            mtime = os.path.getmtime(active_path)
+            file_date = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d')
+        except OSError:
+            continue
+        if file_date == today:
+            continue  # 今天已轮转
+
+        archive_path = os.path.join(LOG_DIR, f'{base_name}.{file_date}.log')
+        # 保存当前流引用
+        old_stream = sys.stdout if base_name == 'stdout' else sys.stderr
+        try:
+            old_stream.flush()
+            old_stream.close()
+        except Exception:
+            pass
+
+        try:
+            if os.path.exists(archive_path):
+                os.remove(active_path)
+            else:
+                os.rename(active_path, archive_path)
+        except OSError as e:
+            print(f"[LOGROTATE] 轮转 {base_name}.log 失败: {e}", flush=True)
+            # 无论如何都要重新打开文件，否则日志会丢失
+        finally:
+            new_stream = open(active_path, 'a', buffering=1)
+            if base_name == 'stdout':
+                sys.stdout = new_stream
+            else:
+                sys.stderr = new_stream
+
+        print(f"[LOGROTATE] 运行时轮转: {base_name}.log → {archive_path}", flush=True)
+
+
 # ==================== Flask 路由 ====================
 
 @app.route('/healthz')
@@ -527,6 +644,8 @@ def api_save_config():
             prune_result = prune_all()
             if prune_result['scan_deleted'] > 0 or prune_result['event_deleted'] > 0:
                 print(f"[CONFIG] 保存后裁剪: 扫描-{prune_result['scan_deleted']}条, 事件-{prune_result['event_deleted']}条", flush=True)
+            # 保存后立刻按新保留天数清理过期归档日志
+            _cleanup_old_archives()
             # 更新调度间隔
             print("[DEBUG] save ok, calling on_scan_interval_changed...", flush=True)
             on_scan_interval_changed()
@@ -649,11 +768,17 @@ def api_resolver_status():
 def main():
     global scheduler
 
+    # ---- 日志轮转（必须在重定向 stdout/stderr 之前） ----
+    _rotate_active_log_files()
+
     # 将 stdout / stderr 重定向到日志文件，配合 docker compose 挂载实现持久化
     log_dir = '/app/logs'
     os.makedirs(log_dir, exist_ok=True)
     sys.stdout = open(os.path.join(log_dir, 'stdout.log'), 'a', buffering=1)
     sys.stderr = open(os.path.join(log_dir, 'stderr.log'), 'a', buffering=1)
+
+    # ---- 启动时清理过期归档日志 ----
+    _cleanup_old_archives()
 
     print("=" * 60)
     print("  VPN 在线监控系统 v1.0")
@@ -685,8 +810,20 @@ def main():
         replace_existing=True,
         max_instances=1
     )
+    # 每日日志维护（清理过期归档 + 运行时轮转），在凌晨 3:00 执行
+    scheduler.add_job(
+        _daily_log_maintenance,
+        'cron',
+        hour=3,
+        minute=0,
+        id='daily_log_maintenance',
+        replace_existing=True,
+        max_instances=1
+    )
     scheduler.start()
     print(f"[SCHEDULER] 定时采集已启动，间隔 {interval} 秒")
+    retention = int(cfg.get('log_retention_days', 30))
+    print(f"[SCHEDULER] 每日日志维护已启动（凌晨 3:00），日志保留 {retention} 天")
 
     # 启动自愈 watchdog 后台线程
     watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name='watchdog')
