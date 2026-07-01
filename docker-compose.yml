@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       # 挂载配置文件，用户可直接编辑或通过 Web 后台修改
       - ./config.json:/app/config.json

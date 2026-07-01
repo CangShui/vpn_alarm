@@ -197,10 +197,11 @@ def do_scan():
                         'connected_since': connected_since,
                         'location': location
                     }, ensure_ascii=False)
-                    detail = f"新客户端上线: {detail_item['ip']}（{location}），{_format_connection_age(detail_item.get('connected_seconds'))}|||{structured}"
-                    print(f"  [EVENT] {detail}", flush=True)
-                    save_event('new_client_alert', srv_name, detail, notified=1)
-                    notify_event('新客户端上线', detail, srv_name)
+                    notify_detail = f"新客户端上线: {detail_item['ip']}（{location}）"
+                    event_detail = f"{notify_detail}|||{structured}"
+                    print(f"  [EVENT] {notify_detail}", flush=True)
+                    save_event('new_client_alert', srv_name, event_detail, notified=1)
+                    notify_event('新客户端上线', notify_detail, srv_name)
 
                 # 更新缓存
                 last_client_ips[srv_name] = new_ips
