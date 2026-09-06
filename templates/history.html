@@ -42,6 +42,17 @@
     </div>
 </div>
 
+<div id="snapshot-modal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="snapshot-modal-title">
+        <div class="modal-header">
+            <h3 id="snapshot-modal-title">事件原始日志</h3>
+            <button type="button" class="modal-close" onclick="closeSnapshotModal()" aria-label="关闭">&times;</button>
+        </div>
+        <div id="snapshot-modal-meta" class="modal-meta"></div>
+        <pre id="snapshot-modal-body" class="snapshot-log">加载中...</pre>
+    </div>
+</div>
+
 <script>
 // 每个标签页的独立分页状态
 var tabState = {
@@ -114,7 +125,7 @@ function renderTable(tab, items) {
             html += '</tr>';
         });
     } else {
-        html += '<thead><tr><th>ID</th><th>时间</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th></tr></thead><tbody>';
+        html += '<thead><tr><th>ID</th><th>时间</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th><th>日志记录</th></tr></thead><tbody>';
         items.forEach(function(e) {
             html += '<tr>';
             html += '<td>' + e.id + '</td>';
@@ -123,6 +134,11 @@ function renderTable(tab, items) {
             html += '<td>' + esc(e.server_name) + '</td>';
             html += '<td>' + formatEventDetail(e.event_type, e.detail, e.event_time) + '</td>';
             html += '<td>' + (e.notified ? '是' : '否') + '</td>';
+            if (e.snapshot_file) {
+                html += '<td><button type="button" class="btn-view-log" onclick="viewEventSnapshot(' + e.id + ')">查看日志</button></td>';
+            } else {
+                html += '<td class="muted-text">无快照</td>';
+            }
             html += '</tr>';
         });
     }
@@ -245,6 +261,42 @@ function esc(str) {
     if (!str) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+function viewEventSnapshot(eventId) {
+    var overlay = document.getElementById('snapshot-modal');
+    var meta = document.getElementById('snapshot-modal-meta');
+    var body = document.getElementById('snapshot-modal-body');
+    overlay.hidden = false;
+    meta.textContent = '事件 #' + eventId;
+    body.textContent = '加载中...';
+    fetch('/api/events/' + eventId + '/snapshot')
+        .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
+        .then(function(res) {
+            if (!res.data || !res.data.ok) {
+                throw new Error((res.data && res.data.error) || '读取失败');
+            }
+            meta.innerHTML =
+                '事件 #' + res.data.event_id +
+                ' · ' + esc(res.data.event_time || '') +
+                ' · ' + esc(res.data.server_name || '') +
+                ' · ' + esc(res.data.filename || '');
+            body.textContent = res.data.content || '(空日志)';
+        })
+        .catch(function(e) {
+            body.textContent = '加载失败: ' + e.message;
+        });
+}
+
+function closeSnapshotModal() {
+    document.getElementById('snapshot-modal').hidden = true;
+}
+
+document.getElementById('snapshot-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeSnapshotModal();
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeSnapshotModal();
+});
 
 // 初始加载
 loadTabData('scans');

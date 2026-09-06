@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 创建日志目录（容器启动时 stdout/stderr 会写入此处）
-RUN mkdir -p /app/logs
+# 创建日志目录与事件快照目录（stdout/stderr 与事件原始日志写入此处）
+RUN mkdir -p /app/logs /app/data/event_snapshots
 
 # 安装依赖及 curl（供 healthcheck 使用）
 RUN apt-get update && apt-get install -y curl procps && rm -rf /var/lib/apt/lists/*

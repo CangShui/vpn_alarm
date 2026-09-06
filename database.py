@@ -4,9 +4,12 @@
 import sqlite3
 import json
 import os
+import re
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'vpn_alarm.db')
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_BASE_DIR, 'data', 'vpn_alarm.db')
+SNAPSHOT_DIR = os.path.join(_BASE_DIR, 'data', 'event_snapshots')
 
 
 def get_connection():
@@ -40,7 +43,8 @@ def init_db():
             event_type TEXT NOT NULL,
             server_name TEXT,
             detail TEXT,
-            notified INTEGER DEFAULT 0
+            notified INTEGER DEFAULT 0,
+            snapshot_file TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS config_store (
@@ -49,9 +53,13 @@ def init_db():
             updated_at TEXT
         );
     ''')
-    columns = [row['name'] for row in conn.execute('PRAGMA table_info(scan_records)').fetchall()]
-    if 'client_details' not in columns:
+    scan_columns = [row['name'] for row in conn.execute('PRAGMA table_info(scan_records)').fetchall()]
+    if 'client_details' not in scan_columns:
         conn.execute("ALTER TABLE scan_records ADD COLUMN client_details TEXT DEFAULT '[]'")
+    event_columns = [row['name'] for row in conn.execute('PRAGMA table_info(events)').fetchall()]
+    if 'snapshot_file' not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN snapshot_file TEXT DEFAULT ''")
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     conn.commit()
     conn.close()
 
@@ -72,18 +80,59 @@ def _prune_scan_records(conn, max_retention):
         print(f"[DB] 裁剪扫描记录：删除 {delete_count} 条，保留 {max_retention} 条", flush=True)
 
 
+def _snapshot_path(filename):
+    """返回快照文件的绝对路径；非法文件名返回 None。"""
+    if not filename:
+        return None
+    basename = os.path.basename(str(filename).strip())
+    if not basename or basename != str(filename).strip():
+        return None
+    return os.path.join(SNAPSHOT_DIR, basename)
+
+
+def _write_event_snapshot(event_id, server_name, event_time, content):
+    """将事件触发时刻的采集原始输出写入挂载目录 data/event_snapshots/。"""
+    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+    safe_server = re.sub(r'[^\w\-.]+', '_', server_name or 'server').strip('_')[:40] or 'server'
+    safe_time = re.sub(r'[^\d]', '', event_time or '')[:14] or 'unknown'
+    filename = f'{int(event_id)}_{safe_server}_{safe_time}.log'
+    path = os.path.join(SNAPSHOT_DIR, filename)
+    with open(path, 'w', encoding='utf-8', errors='replace') as f:
+        f.write(content if content is not None else '')
+    return filename
+
+
+def _delete_snapshot_files(rows):
+    """删除事件对应的快照文件（裁剪时调用）。"""
+    for row in rows or []:
+        filename = row['snapshot_file'] if isinstance(row, sqlite3.Row) else (row.get('snapshot_file') if isinstance(row, dict) else '')
+        path = _snapshot_path(filename)
+        if not path:
+            continue
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as e:
+            print(f"[DB] 删除事件快照失败: {filename}: {e}", flush=True)
+
+
 def _prune_events(conn, max_retention):
-    """按最大保留条数裁剪事件日志（保留最新的）"""
+    """按最大保留条数裁剪事件日志（保留最新的），并同步删除对应快照文件。"""
     if not max_retention or max_retention <= 0:
         return
     count_row = conn.execute('SELECT COUNT(*) as c FROM events').fetchone()
     total = count_row['c']
     if total > max_retention:
         delete_count = total - max_retention
+        old_rows = conn.execute(
+            'SELECT id, snapshot_file FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)',
+            (max_retention,)
+        ).fetchall()
         conn.execute(
             'DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)',
             (max_retention,)
         )
+        _delete_snapshot_files(old_rows)
         print(f"[DB] 裁剪事件日志：删除 {delete_count} 条，保留 {max_retention} 条", flush=True)
 
 
@@ -105,13 +154,22 @@ def save_scan_record(server_name, server_type, scan_time, online_count,
     conn.close()
 
 
-def save_event(event_type, server_name, detail, notified=0):
+def save_event(event_type, server_name, detail, notified=0, snapshot_content=None):
+    """写入事件日志。snapshot_content 为触发时刻的采集原始输出（如 openvpn-status.log）。"""
+    event_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     conn = get_connection()
-    conn.execute('''
-        INSERT INTO events (event_time, event_type, server_name, detail, notified)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-          event_type, server_name, detail, notified))
+    cur = conn.execute('''
+        INSERT INTO events (event_time, event_type, server_name, detail, notified, snapshot_file)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (event_time, event_type, server_name, detail, notified, ''))
+    event_id = cur.lastrowid
+    snapshot_file = ''
+    if snapshot_content is not None:
+        try:
+            snapshot_file = _write_event_snapshot(event_id, server_name, event_time, snapshot_content)
+            conn.execute('UPDATE events SET snapshot_file=? WHERE id=?', (snapshot_file, event_id))
+        except Exception as e:
+            print(f"[DB] 写入事件快照失败: event_id={event_id}: {e}", flush=True)
     # 自动裁剪：按 event_history_retention 上限删除旧记录
     from config_manager import load_config
     cfg = load_config()
@@ -119,6 +177,7 @@ def save_event(event_type, server_name, detail, notified=0):
     _prune_events(conn, max_retention)
     conn.commit()
     conn.close()
+    return event_id
 
 
 def get_latest_scan_per_server():
@@ -186,6 +245,34 @@ def get_events_paginated(page=1, page_size=50):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows], total, page
+
+
+def get_event_snapshot(event_id):
+    """读取指定事件触发时刻保存的原始采集日志快照。
+    返回 dict: {event, filename, content}；不存在时返回 None。"""
+    try:
+        event_id = int(event_id)
+    except (TypeError, ValueError):
+        return None
+    conn = get_connection()
+    row = conn.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    rec = dict(row)
+    path = _snapshot_path(rec.get('snapshot_file') or '')
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+    except OSError:
+        return None
+    return {
+        'event': rec,
+        'filename': os.path.basename(path),
+        'content': content
+    }
 
 
 def get_known_ips():
@@ -260,10 +347,15 @@ def prune_all():
             total = count_row['c']
             if total > max_event:
                 result['event_deleted'] = total - max_event
+                old_rows = conn.execute(
+                    'SELECT id, snapshot_file FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)',
+                    (max_event,)
+                ).fetchall()
                 conn.execute(
                     'DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT ?)',
                     (max_event,)
                 )
+                _delete_snapshot_files(old_rows)
                 print(f"[DB] prune_all: 事件日志删除 {result['event_deleted']} 条，保留 {max_event} 条", flush=True)
     except Exception as e:
         print(f"[DB] prune_all event error: {e}", flush=True)

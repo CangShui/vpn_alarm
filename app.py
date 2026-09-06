@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database import init_db, save_scan_record, save_event, get_latest_scan_per_server, \
     get_recent_scans, get_recent_events, get_known_ips, db_ping, get_db_stats, \
-    get_scans_paginated, get_events_paginated, prune_all
+    get_scans_paginated, get_events_paginated, get_event_snapshot, prune_all
 from collector import collect_server
 from geo_resolver import init_resolvers, resolve_ip, resolve_ips, get_resolver_status
 from notifier import send_telegram, send_webhook
@@ -200,7 +200,13 @@ def do_scan():
                     notify_detail = f"新客户端上线: {detail_item['ip']}（{location}）"
                     event_detail = f"{notify_detail}|||{structured}"
                     print(f"  [EVENT] {notify_detail}", flush=True)
-                    save_event('new_client_alert', srv_name, event_detail, notified=1)
+                    save_event(
+                        'new_client_alert',
+                        srv_name,
+                        event_detail,
+                        notified=1,
+                        snapshot_content=result.get('raw_output', '')
+                    )
                     notify_event('新客户端上线', notify_detail, srv_name)
 
                 # 更新缓存
@@ -613,6 +619,23 @@ def api_events():
         'total': total,
         'page': clamped_page,
         'page_size': page_size
+    })
+
+
+@app.route('/api/events/<int:event_id>/snapshot')
+def api_event_snapshot(event_id):
+    """API: 读取事件触发时刻保存的原始采集日志（如 openvpn-status.log）"""
+    rec = get_event_snapshot(event_id)
+    if not rec:
+        return jsonify({'ok': False, 'error': '该事件没有保存原始日志快照'}), 404
+    return jsonify({
+        'ok': True,
+        'event_id': rec['event']['id'],
+        'event_time': rec['event']['event_time'],
+        'event_type': rec['event']['event_type'],
+        'server_name': rec['event']['server_name'],
+        'filename': rec['filename'],
+        'content': rec['content']
     })
 
 
