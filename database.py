@@ -65,6 +65,131 @@ def init_db():
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     conn.commit()
     conn.close()
+    # 修复 severity 字段引入前的历史事件等级（一次性，幂等）
+    reclassify_legacy_events()
+
+
+def _extract_event_ip(detail):
+    """从事件 detail 的结构化 JSON 中提取 IP，供重算等级时匹配。"""
+    if not detail:
+        return None
+    match = re.search(r'"ip"\s*:\s*"([^"]+)"', detail)
+    return match.group(1) if match else None
+
+
+def _norm_city_name(value):
+    return str(value or '').strip().casefold().removesuffix('市')
+
+
+def reclassify_legacy_events():
+    """按事件快照（无快照时回退到对应扫描记录）重算旧事件等级。
+
+    severity 字段是在 2.0.6 才引入的，旧记录被 ALTER 默认填成“重要”。
+    这里根据当时的原始 openvpn-status 输出重新判定：
+      - 未认证（UNDEF / 无虚拟 IP）→ 提示
+      - 已认证且地点明确非信任城市 → 紧急
+      - 其余（信任城市 / 地点未知）→ 重要
+    通过 config_store 标记只执行一次，幂等安全。
+    """
+    try:
+        from config_manager import load_config
+        from collector import _parse_openvpn
+    except Exception as exc:
+        print(f"[DB] 旧事件等级重算跳过（依赖不可用）: {exc}", flush=True)
+        return 0
+    try:
+        conn = get_connection()
+        marker = conn.execute(
+            "SELECT value FROM config_store WHERE key='severity_backfill_done'"
+        ).fetchone()
+        if marker:
+            conn.close()
+            return 0
+
+        trusted = {
+            _norm_city_name(item)
+            for item in (load_config().get('trusted_cities') or ['北京'])
+            if _norm_city_name(item)
+        }
+        rows = conn.execute(
+            "SELECT id, server_name, event_type, detail, snapshot_file, severity FROM events"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            detail = row['detail'] or ''
+            ip = _extract_event_ip(detail)
+            raw = None
+
+            # 优先用事件触发时刻的快照
+            path = _snapshot_path(row['snapshot_file'])
+            if path and os.path.isfile(path):
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        raw = f.read()
+                except OSError:
+                    raw = None
+
+            # 快照缺失时回退到包含该 IP 的最新扫描原始输出
+            if raw is None and ip:
+                scan_row = conn.execute(
+                    "SELECT raw_output FROM scan_records "
+                    "WHERE server_name=? AND raw_output LIKE ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (row['server_name'], '%' + ip + '%')
+                ).fetchone()
+                if scan_row and scan_row['raw_output']:
+                    raw = scan_row['raw_output']
+
+            if not raw:
+                continue
+            try:
+                _ips, _count, details = _parse_openvpn(raw)
+            except Exception:
+                continue
+            if not details:
+                continue
+
+            matched = next((d for d in details if d['ip'] == ip), None) if ip else None
+            if matched is None and len(details) == 1:
+                matched = details[0]
+            if matched is None:
+                continue
+
+            location = ''
+            loc_match = re.search(r'"location"\s*:\s*"([^"]*)"', detail)
+            if loc_match:
+                location = loc_match.group(1)
+
+            if not matched.get('authenticated'):
+                new_severity = '提示'
+            else:
+                loc_norm = _norm_city_name(location)
+                if loc_norm and '未知' not in loc_norm and '-' not in loc_norm:
+                    new_severity = '重要' if any(
+                        item and item in loc_norm for item in trusted
+                    ) else '紧急'
+                else:
+                    new_severity = '重要'
+
+            if new_severity != (row['severity'] or '重要'):
+                conn.execute(
+                    "UPDATE events SET severity=? WHERE id=?", (new_severity, row['id'])
+                )
+                updated += 1
+
+        conn.execute(
+            "INSERT OR REPLACE INTO config_store (key, value, updated_at) "
+            "VALUES ('severity_backfill_done', '1', ?)",
+            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),)
+        )
+        conn.commit()
+        conn.close()
+        if updated:
+            print(f"[DB] 旧事件等级重算完成：更新 {updated} 条", flush=True)
+        return updated
+    except Exception as exc:
+        print(f"[DB] 旧事件等级重算失败: {exc}", flush=True)
+        return 0
 
 
 def _prune_scan_records(conn, max_retention):
