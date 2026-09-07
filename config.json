@@ -31,6 +31,10 @@
   "geo_file_path": "GeoLite2-City.mmdb",
   "scan_history_retention": 10000,
   "event_history_retention": 5000,
+  "trusted_cities": [
+    "北京"
+  ],
+  "emergency_repeat_interval": 300,
   "notifications": {
     "telegram": {
       "enabled": false,

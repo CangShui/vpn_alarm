@@ -183,6 +183,38 @@ body {
     color: #e67e22;
 }
 
+.severity-badge {
+    display: inline-block;
+    min-width: 42px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.severity-info { background: #eef2f5; color: #52606d; border: 1px solid #d9e0e5; }
+.severity-important { background: #fff3cd; color: #7a5800; border: 1px solid #f0d98a; }
+.severity-emergency { background: #f8d7da; color: #8a1c26; border: 1px solid #eba7ad; }
+
+.severity-policy-list {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.severity-policy-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 10px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    color: #555;
+    font-size: 13px;
+}
+
 /* 表单样式 */
 .form-row {
     display: flex;

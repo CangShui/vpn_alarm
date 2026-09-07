@@ -125,11 +125,12 @@ function renderTable(tab, items) {
             html += '</tr>';
         });
     } else {
-        html += '<thead><tr><th>ID</th><th>时间</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th><th>日志记录</th></tr></thead><tbody>';
+        html += '<thead><tr><th>ID</th><th>时间</th><th>等级</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th><th>日志记录</th></tr></thead><tbody>';
         items.forEach(function(e) {
             html += '<tr>';
             html += '<td>' + e.id + '</td>';
             html += '<td>' + esc(e.event_time) + '</td>';
+            html += '<td>' + severityBadge(e.severity) + '</td>';
             html += '<td><span class="event-type">' + esc(e.event_type) + '</span></td>';
             html += '<td>' + esc(e.server_name) + '</td>';
             html += '<td>' + formatEventDetail(e.event_type, e.detail, e.event_time) + '</td>';
@@ -211,6 +212,12 @@ function changePageSize(tab, size) {
     state.page = 1;  // 切换每页条数总是回到第一页
     state.total = 0; // 临时置零避免跳页闪烁（加载后会更新）
     loadTabData(tab);
+}
+
+function severityBadge(severity) {
+    var value = severity || '重要';
+    var cls = value === '紧急' ? 'severity-emergency' : (value === '提示' ? 'severity-info' : 'severity-important');
+    return '<span class="severity-badge ' + cls + '">' + esc(value) + '</span>';
 }
 
 function formatEventDetail(eventType, detail, eventTime) {

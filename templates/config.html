@@ -105,6 +105,35 @@
             </div>
         </div>
 
+        <!-- 告警等级策略 -->
+        <div class="card alert-policy-card">
+            <h3>告警等级策略</h3>
+            <div class="severity-policy-list">
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-info">提示</span>
+                    <span>OpenVPN 请求未分配虚拟 IP，只写入事件日志，不发送通知。</span>
+                </div>
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-important">重要</span>
+                    <span>客户端已连接，且城市可信或无法明确解析城市，只发送一次通知。</span>
+                </div>
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-emergency">紧急</span>
+                    <span>客户端已连接，且本地 GeoIP 明确解析为非信任城市，持续通知直到断开。</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>信任城市:</label>
+                <input type="text" name="trusted_cities" value="{{ config.trusted_cities | join(', ') }}" style="width:400px;" placeholder="例如: 北京, 上海">
+                <span style="font-size:12px; color:#888;">多个城市用逗号分隔；“北京”和“北京市”视为同一城市</span>
+            </div>
+            <div class="form-row">
+                <label>紧急重复间隔:</label>
+                <input type="number" name="emergency_repeat_interval" value="{{ config.emergency_repeat_interval }}" min="10" max="86400" style="width:120px;">
+                <span style="font-size:12px; color:#888;">秒；紧急客户端在线期间按此间隔重复发送</span>
+            </div>
+        </div>
+
         <!-- 通知配置 -->
         <div class="card">
             <h3>Telegram 通知</h3>
@@ -209,6 +238,9 @@ function saveConfig() {
             event_history_retention: parseInt(document.querySelector('input[name="event_history_retention"]').value) || 5000,
             log_retention_days: parseInt(document.querySelector('input[name="log_retention_days"]').value) || 30,
             geo_file_path: document.querySelector('input[name="geo_file_path"]').value.trim(),
+            trusted_cities: document.querySelector('input[name="trusted_cities"]').value
+                .split(/[,，]/).map(function(v) { return v.trim(); }).filter(Boolean),
+            emergency_repeat_interval: parseInt(document.querySelector('input[name="emergency_repeat_interval"]').value) || 300,
             servers: [],
             notifications: {
                 telegram: {

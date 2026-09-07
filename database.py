@@ -44,7 +44,8 @@ def init_db():
             server_name TEXT,
             detail TEXT,
             notified INTEGER DEFAULT 0,
-            snapshot_file TEXT DEFAULT ''
+            snapshot_file TEXT DEFAULT '',
+            severity TEXT DEFAULT '重要'
         );
 
         CREATE TABLE IF NOT EXISTS config_store (
@@ -59,6 +60,8 @@ def init_db():
     event_columns = [row['name'] for row in conn.execute('PRAGMA table_info(events)').fetchall()]
     if 'snapshot_file' not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN snapshot_file TEXT DEFAULT ''")
+    if 'severity' not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN severity TEXT DEFAULT '重要'")
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     conn.commit()
     conn.close()
@@ -154,14 +157,15 @@ def save_scan_record(server_name, server_type, scan_time, online_count,
     conn.close()
 
 
-def save_event(event_type, server_name, detail, notified=0, snapshot_content=None):
+def save_event(event_type, server_name, detail, notified=0, snapshot_content=None, severity='重要'):
     """写入事件日志。snapshot_content 为触发时刻的采集原始输出（如 openvpn-status.log）。"""
     event_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    severity = severity if severity in ('提示', '重要', '紧急') else '重要'
     conn = get_connection()
     cur = conn.execute('''
-        INSERT INTO events (event_time, event_type, server_name, detail, notified, snapshot_file)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (event_time, event_type, server_name, detail, notified, ''))
+        INSERT INTO events (event_time, event_type, server_name, detail, notified, snapshot_file, severity)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (event_time, event_type, server_name, detail, notified, '', severity))
     event_id = cur.lastrowid
     snapshot_file = ''
     if snapshot_content is not None:

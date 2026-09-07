@@ -31,6 +31,7 @@ app = Flask(__name__)
 last_client_ips = {}   # server_name -> set of IPs
 last_online_counts = {}  # server_name -> int
 alerted_client_keys = {}  # server_name -> set of (ip, marker)
+active_emergency_alerts = {}  # (server_name, ip, marker) -> {last_notified_at, detail}
 _collect_lock = threading.Lock()
 scheduler = None
 _last_scan_start_time = None   # datetime
@@ -45,30 +46,63 @@ _watchdog_enabled = True  # 控制 watchdog 线程启停（测试用）
 CRITICAL_CHECKS = {'database', 'scheduler', 'scan_job', 'last_scan', 'status_page', 'api_status'}
 
 
+def _coerce_bool(value):
+    """把任意输入安全地转换为布尔值，兼容字符串 'false'/'0' 等。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().casefold()
+    if text in ('false', '0', 'no', 'off', 'none', 'null', 'undefined', ''):
+        return False
+    return bool(text)
+
+
 def _normalize_client_details(raw_details):
     normalized = []
     for item in raw_details or []:
         if not isinstance(item, dict):
             continue
-        ip = str(item.get('ip') or '').strip()
-        if not ip:
-            continue
+        # 事件兜底：即使状态格式异常或地址缺失，也保留一条可追踪的请求记录。
+        ip = str(item.get('ip') or '').strip() or '未知'
         seconds = item.get('connected_seconds')
         try:
             seconds = int(seconds) if seconds is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             seconds = None
+        try:
+            bytes_received = int(item.get('bytes_received') or 0)
+        except (TypeError, ValueError):
+            bytes_received = 0
+        try:
+            bytes_sent = int(item.get('bytes_sent') or 0)
+        except (TypeError, ValueError):
+            bytes_sent = 0
         normalized.append({
             'ip': ip,
             'connected_since': str(item.get('connected_since') or '').strip(),
             'connected_seconds': seconds,
-            'source': str(item.get('source') or '').strip()
+            'source': str(item.get('source') or '').strip(),
+            'common_name': str(item.get('common_name') or '').strip(),
+            'real_address': str(item.get('real_address') or '').strip(),
+            'virtual_ip': str(item.get('virtual_ip') or '').strip(),
+            'bytes_received': bytes_received,
+            'bytes_sent': bytes_sent,
+            'authenticated': _coerce_bool(item.get('authenticated', False)),
+            'observed_request': _coerce_bool(item.get('observed_request', True)),
+            'request_key': str(item.get('request_key') or '').strip()
         })
     return normalized
 
 
 def _get_session_marker(detail):
-    return detail.get('connected_since') or str(detail.get('connected_seconds'))
+    connected = detail.get('connected_since') or str(detail.get('connected_seconds') or 'unknown')
+    real_address = detail.get('real_address') or 'unknown'
+    virtual_ip = detail.get('virtual_ip') or 'no-vip'
+    common_name = detail.get('common_name') or 'no-cn'
+    return f'{virtual_ip}|{common_name}|{connected}|{real_address}'
 
 
 def _get_alertable_sessions(client_details, window_seconds):
@@ -88,42 +122,67 @@ def _format_connection_age(seconds):
     return f'已连接 {seconds} 秒'
 
 
-def _format_ip_location(ip):
-    """将 resolve_ip 结果转换为通知用的地点文本。
-    优先组合 城市 / 地区 / 国家 中非空非 '-' 的字段，全部无效时返回 '未知地区'。"""
+def _resolve_location(ip):
+    """返回 GeoIP 原始结果和展示文本。解析失败时不猜测城市。"""
     try:
         geo = resolve_ip(ip)
-    except Exception:
-        return '未知地区'
+    except Exception as e:
+        geo = {'city': '-', 'region': '-', 'country': '-', 'source': '无解析器', 'error': str(e)}
     parts = []
     for key in ('city', 'region', 'country'):
         val = str(geo.get(key, '')).strip()
         if val and val != '-':
             parts.append(val)
-    return ' | '.join(parts) if parts else '未知地区'
+    return geo, (' | '.join(parts) if parts else '未知地区')
 
 
-def notify_event(event_type, detail, server_name=''):
-    """按配置发送通知"""
+def _normalize_city_name(value):
+    return str(value or '').strip().casefold().removesuffix('市')
+
+
+def _is_trusted_city(geo, trusted_cities):
+    city = _normalize_city_name(geo.get('city'))
+    if not city or city == '-':
+        return None
+    trusted = {_normalize_city_name(item) for item in (trusted_cities or []) if _normalize_city_name(item)}
+    return city in trusted
+
+
+def _classify_session(server_type, detail, geo, trusted_cities):
+    """提示: OpenVPN 未分配虚拟 IP；重要: 已连接；紧急: 已连接且明确不在信任城市。"""
+    if server_type == 'openvpn' and not detail.get('authenticated'):
+        return '提示'
+    trusted = _is_trusted_city(geo, trusted_cities)
+    if trusted is False:
+        return '紧急'
+    return '重要'
+
+
+def notify_event(event_type, detail, server_name='', severity='重要', repeat=False):
+    """按等级发送通知。提示级只记录事件，不调用通知渠道。"""
+    if severity == '提示':
+        return []
     cfg = load_config()
     notif = cfg.get('notifications', {})
     messages = []
+    repeat_text = '（持续告警）' if repeat else ''
+    title = f'[{severity}] VPN 监控告警{repeat_text}'
 
     # Telegram
     tg = notif.get('telegram', {})
     if tg.get('enabled'):
-        msg = f"<b>VPN 监控告警</b>\n类型: {event_type}\n服务器: {server_name}\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n详情: {detail}"
+        msg = f"<b>{title}</b>\n类型: {event_type}\n服务器: {server_name}\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n详情: {detail}"
         ok, info = send_telegram(tg.get('token'), tg.get('chat_id'), msg)
         messages.append(f"Telegram: {info}")
-        print(f"[NOTIFY] Telegram | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
+        print(f"[NOTIFY] {severity} | Telegram | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
 
     # Webhook
     wh = notif.get('webhook', {})
     if wh.get('enabled'):
-        msg = f"[{event_type}] {server_name}: {detail}"
+        msg = f"[{severity}] [{event_type}] {server_name}: {detail}"
         ok, info = send_webhook(wh, msg)
         messages.append(f"Webhook: {info}")
-        print(f"[NOTIFY] Webhook | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
+        print(f"[NOTIFY] {severity} | Webhook | 事件: {event_type} | 服务器: {server_name} | {'成功' if ok else '失败'}: {info}", flush=True)
 
     return messages
 
@@ -167,54 +226,125 @@ def do_scan():
         # ---- 事件检测 ----
         with _collect_lock:
             prev_ips = last_client_ips.get(srv_name, set())
-            prev_count = last_online_counts.get(srv_name)
             prev_alerted_keys = alerted_client_keys.get(srv_name, set())
 
             # 1. 服务不可达
             if result['status'] != 'success':
                 detail = f"服务不可达: {result['error_message']}"
                 print(f"  [EVENT] {detail}", flush=True)
-                notify_event('服务不可达', detail, srv_name)
+                notify_event('服务不可达', detail, srv_name, severity='重要')
 
             else:
+                server_type = srv.get('type', '')
                 new_ips = set(result['client_ips'])
                 new_count = result['online_count']
-                new_ip_set = new_ips - prev_ips
                 client_details = _normalize_client_details(result.get('client_details', []))
                 alertable_sessions = _get_alertable_sessions(client_details, alert_window)
+                # OpenVPN 的每一行都是已观察到的请求：即使没有时间戳或超过告警窗口，
+                # 也必须进入事件日志，使用“提示”作为兜底等级。
+                sessions_to_record = client_details if server_type == 'openvpn' else alertable_sessions
                 current_session_keys = {(detail['ip'], _get_session_marker(detail)) for detail in client_details}
+                trusted_cities = cfg.get('trusted_cities', ['北京'])
+                repeat_interval = max(10, int(cfg.get('emergency_repeat_interval', 300)))
+                now_ts = time.time()
+                classified = {}
 
-                for detail_item in alertable_sessions:
+                for detail_item in client_details:
                     session_key = (detail_item['ip'], _get_session_marker(detail_item))
-                    if detail_item['ip'] not in new_ip_set and session_key in prev_alerted_keys:
-                        continue
+                    geo, location = _resolve_location(detail_item['ip'])
+                    severity = _classify_session(server_type, detail_item, geo, trusted_cities)
+                    classified[session_key] = (severity, geo, location, detail_item)
+
+                for detail_item in sessions_to_record:
+                    session_key = (detail_item['ip'], _get_session_marker(detail_item))
                     if session_key in prev_alerted_keys:
                         continue
-                    location = _format_ip_location(detail_item['ip'])
+
+                    severity, geo, location, _ = classified[session_key]
                     connected_since = str(detail_item.get('connected_since', '')).strip()
+                    authenticated = bool(detail_item.get('authenticated')) if server_type == 'openvpn' else True
+                    event_type = 'connection_request' if severity == '提示' else 'new_client_alert'
+                    action_text = '未认证连接请求' if severity == '提示' else '新客户端上线'
+                    extra = ''
+                    if server_type == 'openvpn':
+                        extra = (f"，CN={detail_item.get('common_name') or 'UNDEF'}"
+                                 f"，虚拟IP={detail_item.get('virtual_ip') or '未分配'}")
+                    notify_detail = f"{action_text}: {detail_item['ip']}（{location}{extra}）"
                     structured = json.dumps({
                         'ip': detail_item['ip'],
                         'connected_since': connected_since,
-                        'location': location
+                        'location': location,
+                        'city': geo.get('city', '-'),
+                        'severity': severity,
+                        'authenticated': authenticated,
+                        'common_name': detail_item.get('common_name', ''),
+                        'virtual_ip': detail_item.get('virtual_ip', '')
                     }, ensure_ascii=False)
-                    notify_detail = f"新客户端上线: {detail_item['ip']}（{location}）"
                     event_detail = f"{notify_detail}|||{structured}"
-                    print(f"  [EVENT] {notify_detail}", flush=True)
+                    should_notify = severity in ('重要', '紧急')
+                    print(f"  [EVENT] [{severity}] {notify_detail}", flush=True)
                     save_event(
-                        'new_client_alert',
+                        event_type,
                         srv_name,
                         event_detail,
-                        notified=1,
-                        snapshot_content=result.get('raw_output', '')
+                        notified=1 if should_notify else 0,
+                        snapshot_content=result.get('raw_output', ''),
+                        severity=severity
                     )
-                    notify_event('新客户端上线', notify_detail, srv_name)
+                    if should_notify:
+                        notify_event(action_text, notify_detail, srv_name, severity=severity)
+                    if severity == '紧急':
+                        emergency_key = (srv_name, session_key[0], session_key[1])
+                        active_emergency_alerts[emergency_key] = {
+                            'last_notified_at': now_ts,
+                            'detail': notify_detail,
+                            'event_type': action_text
+                        }
+
+                # 清理已断开或不再是紧急等级的会话，并按间隔重复通知仍在线的紧急会话
+                current_emergency_keys = {
+                    (srv_name, key[0], key[1])
+                    for key, value in classified.items()
+                    if value[0] == '紧急'
+                }
+                # 容器重启后继续跟踪当前仍在线的紧急会话，从本次采集开始计时。
+                for session_key, value in classified.items():
+                    severity, geo, location, detail_item = value
+                    if severity != '紧急':
+                        continue
+                    emergency_key = (srv_name, session_key[0], session_key[1])
+                    if emergency_key in active_emergency_alerts:
+                        continue
+                    extra = ''
+                    if server_type == 'openvpn':
+                        extra = (f"，CN={detail_item.get('common_name') or 'UNDEF'}"
+                                 f"，虚拟IP={detail_item.get('virtual_ip') or '未分配'}")
+                    active_emergency_alerts[emergency_key] = {
+                        'last_notified_at': now_ts,
+                        'detail': f"新客户端上线: {detail_item['ip']}（{location}{extra}）",
+                        'event_type': '新客户端上线'
+                    }
+                for emergency_key in list(active_emergency_alerts):
+                    if emergency_key[0] != srv_name:
+                        continue
+                    if emergency_key not in current_emergency_keys:
+                        print(f"  [EMERGENCY] 客户端已断开，停止持续告警: {emergency_key[1]}", flush=True)
+                        active_emergency_alerts.pop(emergency_key, None)
+                        continue
+                    state = active_emergency_alerts[emergency_key]
+                    if now_ts - state['last_notified_at'] >= repeat_interval:
+                        notify_event(
+                            state['event_type'], state['detail'], srv_name,
+                            severity='紧急', repeat=True
+                        )
+                        state['last_notified_at'] = now_ts
 
                 # 更新缓存
                 last_client_ips[srv_name] = new_ips
                 last_online_counts[srv_name] = new_count
                 alerted_client_keys[srv_name] = prev_alerted_keys.intersection(current_session_keys)
                 alerted_client_keys[srv_name].update({
-                    (detail['ip'], _get_session_marker(detail)) for detail in alertable_sessions
+                    (detail['ip'], _get_session_marker(detail)) for detail in sessions_to_record
                 })
 
             print(f"  -> 状态={result['status']}, 在线={result['online_count']}, "
@@ -633,6 +763,7 @@ def api_event_snapshot(event_id):
         'event_id': rec['event']['id'],
         'event_time': rec['event']['event_time'],
         'event_type': rec['event']['event_type'],
+        'severity': rec['event'].get('severity', '重要'),
         'server_name': rec['event']['server_name'],
         'filename': rec['filename'],
         'content': rec['content']
@@ -730,13 +861,16 @@ def api_status():
         except Exception:
             client_details = []
         geo_data = resolve_ips(ips)
+        normalized_details = _normalize_client_details(client_details)
+        if rec['server_type'] == 'openvpn':
+            normalized_details = [item for item in normalized_details if item.get('authenticated')]
         result.append({
             'server': rec['server_name'],
             'type': rec['server_type'],
             'scan_time': rec['scan_time'],
             'online_count': rec['online_count'],
             'client_ips': ips,
-            'client_details': _normalize_client_details(client_details),
+            'client_details': normalized_details,
             'geo_data': geo_data,
             'status': rec['status'],
             'error_message': rec['error_message'],

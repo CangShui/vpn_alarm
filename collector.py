@@ -6,6 +6,7 @@ import os
 import re
 import time
 import socket
+import ipaddress
 import threading
 from datetime import datetime
 import paramiko
@@ -372,14 +373,35 @@ def _parse_duration_to_seconds(text):
 
 
 def _parse_datetime_string(value):
-    if not value:
+    """解析 OpenVPN 常见时间格式，包括文本、ISO-8601 和 Unix 时间戳。"""
+    if value is None:
         return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # status-version 2 可能同时提供 Connected Since (time_t)。
+    if re.fullmatch(r'-?\d+(?:\.\d+)?', text):
+        try:
+            return datetime.fromtimestamp(float(text))
+        except (OverflowError, OSError, ValueError):
+            pass
+
     for fmt in ('%Y-%m-%d %H:%M:%S', '%a %b %d %H:%M:%S %Y'):
         try:
-            return datetime.strptime(value.strip(), fmt)
-        except Exception:
+            return datetime.strptime(text, fmt)
+        except ValueError:
             continue
-    return None
+
+    try:
+        iso_text = text[:-1] + '+00:00' if text.endswith('Z') else text
+        parsed = datetime.fromisoformat(iso_text)
+        # 应用内部使用本地时间的 naive datetime，避免 aware/naive 相减报错。
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
 
 
 def _build_client_detail(ip, connected_since=None, connected_seconds=None, source=''):
@@ -504,72 +526,221 @@ def _parse_ikev2(output):
 
 
 def _parse_openvpn(output):
+    """解析 OpenVPN 状态日志，并保留每一条可观察到的客户端请求。
+
+    同时兼容旧式 CLIENT LIST/ROUTING TABLE 和 status-version 2 的
+    ``CLIENT_LIST,...`` 格式。没有虚拟 IP 的行仍返回给上层，供其记录为“提示”；
+    只有能关联到虚拟 IP 的行才计入在线客户端。
     """
-    解析 OpenVPN 状态日志（实际格式）：
-      OpenVPN CLIENT LIST
-      Updated,2026-06-29 01:08:18
-      Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since
-      client1,114.246.237.147:35648,29761,181928,2026-06-29 01:07:17
-      ROUTING TABLE
-      Virtual Address,Common Name,Real Address,Last Ref
-      10.8.0.2,client1,114.246.237.147:35648,2026-06-29 01:08:12
-      GLOBAL STATS
-      ...
-      END
-    """
+    def _normal_key(value):
+        return str(value or '').strip().casefold()
+
+    def _row_from_values(values, columns=None):
+        values = [str(value or '').strip() for value in values]
+        if columns:
+            row = {}
+            for index, value in enumerate(values):
+                if index < len(columns):
+                    row[_normal_key(columns[index])] = value
+            return row
+        # 旧格式的固定字段顺序；即使只有一列也保留，避免静默丢请求。
+        return {
+            'common name': values[0] if len(values) >= 1 else '',
+            'real address': values[1] if len(values) >= 2 else '',
+            'bytes received': values[2] if len(values) >= 3 else '',
+            'bytes sent': values[3] if len(values) >= 4 else '',
+            'connected since': values[4] if len(values) >= 5 else ''
+        }
+
+    def _row_from_v2_values(values, columns=None):
+        """解析没有 HEADER 行时的 status-version 2 固定前缀字段。"""
+        if columns:
+            return _row_from_values(values, columns)
+        values = [str(value or '').strip() for value in values]
+        return {
+            'common name': values[0] if len(values) >= 1 else '',
+            'real address': values[1] if len(values) >= 2 else '',
+            'virtual address': values[2] if len(values) >= 3 else '',
+            'bytes received': values[3] if len(values) >= 4 else '',
+            'bytes sent': values[4] if len(values) >= 5 else '',
+            'connected since': values[5] if len(values) >= 6 else '',
+            'connected since (time_t)': values[6] if len(values) >= 7 else ''
+        }
+
+    def _route_from_values(values, columns=None):
+        """解析没有 HEADER 行时的 ROUTING TABLE 固定字段。"""
+        if columns:
+            return _row_from_values(values, columns)
+        values = [str(value or '').strip() for value in values]
+        return {
+            'virtual address': values[0] if len(values) >= 1 else '',
+            'common name': values[1] if len(values) >= 2 else '',
+            'real address': values[2] if len(values) >= 3 else '',
+            'last ref': values[3] if len(values) >= 4 else ''
+        }
+
+    def _field(row, *names):
+        for name in names:
+            value = row.get(_normal_key(name), '')
+            if value != '':
+                return value
+        return ''
+
+    def _parse_int(value):
+        try:
+            return int(str(value or '').strip())
+        except (TypeError, ValueError):
+            return 0
+
+    def _extract_address(value):
+        text = str(value or '').strip()
+        if not text:
+            return ''
+        # OpenVPN 对 IPv6 通常使用 [addr]:port 表示。
+        if text.startswith('[') and ']:' in text:
+            return text[1:text.index(']:')].strip()
+        # IPv4、主机名和 host:port；不拆未加括号的 IPv6。
+        if text.count(':') == 1:
+            host, port = text.rsplit(':', 1)
+            if port.isdigit():
+                return host.strip()
+        return text.strip('[]').strip()
+
+    def _is_ip(value):
+        try:
+            ipaddress.ip_address(str(value))
+            return True
+        except ValueError:
+            return False
+
+    client_rows = []
+    route_by_real_address = {}
+    section = ''
+    client_columns = None
+    route_columns = None
+    updated_at = None
+
+    for raw_line in str(output or '').split('\n'):
+        # 去除可能存在的 UTF-8 BOM，兼容不同 OpenVPN/status 脚本输出。
+        line = raw_line.strip().lstrip('\ufeff')
+        if not line:
+            continue
+        parts = line.split(',')
+
+        # status-version 2: HEADER,CLIENT_LIST,... / CLIENT_LIST,...
+        folded = line.casefold()
+        if folded.startswith('header,client_list'):
+            client_columns = [part.strip() for part in parts[2:]]
+            section = 'v2_clients'
+            continue
+        if folded.startswith('client_list,'):
+            values = parts[1:]
+            client_rows.append(_row_from_v2_values(values, client_columns))
+            continue
+        if folded.startswith('header,routing_table'):
+            route_columns = [part.strip() for part in parts[2:]]
+            section = 'v2_routes'
+            continue
+        if folded.startswith('routing_table,'):
+            values = parts[1:]
+            route = _route_from_values(values, route_columns)
+            virtual_ip = _field(route, 'Virtual Address', 'Virtual IP')
+            real_address = _field(route, 'Real Address')
+            if virtual_ip and real_address:
+                route_by_real_address[real_address] = virtual_ip
+            continue
+
+        if folded.startswith('updated'):
+            updated_parts = line.split(',', 1)
+            updated_at = _parse_datetime_string(updated_parts[1] if len(updated_parts) > 1 else '')
+            continue
+        if folded.startswith('routing table'):
+            route_columns = None
+            section = 'routes'
+            continue
+        if folded.startswith('common name') and 'real address' in folded:
+            client_columns = [part.strip() for part in parts]
+            section = 'clients'
+            continue
+        if folded.startswith('virtual address'):
+            route_columns = [part.strip() for part in parts]
+            section = 'routes'
+            continue
+        if folded.startswith('global stats') or folded.startswith('global_stats') or folded == 'end':
+            section = ''
+            continue
+        # 标题行后即使标准 CLIENT LIST 表头缺失，也保留后续行作为请求。
+        if folded.startswith('openvpn client list') or folded == 'client list':
+            client_columns = None
+            section = 'clients'
+            continue
+        if folded.startswith('openvpn') or folded.startswith('title') or folded.startswith('time'):
+            continue
+
+        if section in ('clients', 'v2_clients'):
+            row_builder = _row_from_values if section == 'clients' else _row_from_v2_values
+            client_rows.append(row_builder(parts, client_columns))
+        elif section in ('routes', 'v2_routes') and len(parts) >= 3:
+            row_builder = _row_from_values if section == 'routes' else _row_from_v2_values
+            route = row_builder(parts, route_columns)
+            virtual_ip = _field(route, 'Virtual Address', 'Virtual IP')
+            real_address = _field(route, 'Real Address')
+            if virtual_ip and real_address:
+                route_by_real_address[real_address] = virtual_ip
+
     client_ips = set()
     client_details = []
     online_count = 0
-    in_client_section = False
-    seen_detail_ips = set()
-    updated_at = None
+    seen_sessions = set()
 
-    for line in output.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
+    for row_index, row in enumerate(client_rows):
+        common_name = _field(row, 'Common Name', 'Common_Name') or '未知'
+        real_address = _field(row, 'Real Address', 'Real_Address')
+        addr = _extract_address(real_address) or '未知'
+        connected_since = _field(row, 'Connected Since', 'Connected_Since')
+        connected_since_epoch = _field(row, 'Connected Since (time_t)', 'Connected_Since (time_t)')
+        time_value = connected_since or connected_since_epoch
+        connected_since_dt = _parse_datetime_string(time_value)
+        connected_seconds = None
+        if updated_at and connected_since_dt:
+            connected_seconds = max(0, int((updated_at - connected_since_dt).total_seconds()))
 
-        # 跳过标题行和分隔行
-        if line.startswith('OpenVPN') or line == 'END':
-            continue
-        if line.startswith('Updated'):
-            parts = line.split(',', 1)
-            updated_at = _parse_datetime_string(parts[1] if len(parts) > 1 else '')
-            continue
-        if line == 'Common Name,Real Address,Bytes Received,Bytes Sent,Connected Since':
-            in_client_section = True
-            continue
-        if line.startswith('ROUTING TABLE') or line.startswith('GLOBAL STATS'):
-            in_client_section = False
-            continue
-        if line.startswith('Virtual Address') or line.startswith('Max bcast'):
-            continue
+        bytes_received = _parse_int(_field(row, 'Bytes Received', 'Bytes_Received'))
+        bytes_sent = _parse_int(_field(row, 'Bytes Sent', 'Bytes_Sent'))
+        # status-version 2 可能直接在 CLIENT_LIST 中给出 Virtual Address。
+        virtual_ip = _field(row, 'Virtual Address', 'Virtual IP', 'Virtual_Address', 'Virtual_IP')
+        if not virtual_ip:
+            virtual_ip = route_by_real_address.get(real_address, '')
+        authenticated = bool(virtual_ip) and common_name.upper() != 'UNDEF'
 
-        if in_client_section:
-            parts = line.split(',')
-            if len(parts) >= 2:
-                # parts[1] is "Real Address" like "114.246.237.147:35648"
-                addr_port = parts[1].strip()
-                if ':' in addr_port:
-                    addr = addr_port.split(':')[0]
-                else:
-                    addr = addr_port
-                if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', addr):
-                    connected_since = parts[4].strip() if len(parts) >= 5 else ''
-                    connected_since_dt = _parse_datetime_string(connected_since)
-                    connected_seconds = None
-                    if updated_at and connected_since_dt:
-                        connected_seconds = max(0, int((updated_at - connected_since_dt).total_seconds()))
-                    client_ips.add(addr)
-                    if addr not in seen_detail_ips:
-                        client_details.append(_build_client_detail(
-                            addr,
-                            connected_since=connected_since,
-                            connected_seconds=connected_seconds,
-                            source='openvpn'
-                        ))
-                        seen_detail_ips.add(addr)
-                    online_count += 1
+        # 完整字段相同时去重；地址、时间和 CN 都缺失时用行号，避免丢掉后续请求。
+        dedupe_key = (common_name, real_address, time_value, virtual_ip)
+        if not (real_address or time_value or common_name not in ('', '未知')):
+            dedupe_key = ('row', row_index)
+        if dedupe_key in seen_sessions:
+            continue
+        seen_sessions.add(dedupe_key)
+
+        if authenticated:
+            if _is_ip(addr):
+                client_ips.add(addr)
+            online_count += 1
+        detail = _build_client_detail(
+            addr,
+            connected_since=connected_since or connected_since_epoch,
+            connected_seconds=connected_seconds,
+            source='openvpn'
+        )
+        detail.update({
+            'common_name': common_name,
+            'real_address': real_address,
+            'virtual_ip': virtual_ip,
+            'bytes_received': bytes_received,
+            'bytes_sent': bytes_sent,
+            'authenticated': authenticated,
+            'observed_request': True
+        })
+        client_details.append(detail)
 
     return list(client_ips), online_count, client_details
 

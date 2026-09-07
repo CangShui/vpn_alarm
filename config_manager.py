@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "scan_history_retention": 10000,
     "event_history_retention": 5000,
     "log_retention_days": 30,
+    "trusted_cities": ["北京"],
+    "emergency_repeat_interval": 300,
     "notifications": {
         "telegram": {"enabled": False, "token": "", "chat_id": ""},
         "webhook": {"enabled": False, "url": "", "content_type": "application/json",
@@ -44,6 +46,11 @@ def _normalize_config(cfg):
     normalized['scan_history_retention'] = int(normalized.get('scan_history_retention') or 10000)
     normalized['event_history_retention'] = int(normalized.get('event_history_retention') or 5000)
     normalized['log_retention_days'] = max(1, int(normalized.get('log_retention_days') or 30))
+    trusted_cities = normalized.get('trusted_cities', ['北京'])
+    if isinstance(trusted_cities, str):
+        trusted_cities = [item.strip() for item in trusted_cities.replace('，', ',').split(',')]
+    normalized['trusted_cities'] = [str(item).strip() for item in (trusted_cities or []) if str(item).strip()]
+    normalized['emergency_repeat_interval'] = max(10, int(normalized.get('emergency_repeat_interval') or 300))
 
     notifications = source.get('notifications') or {}
     default_notifications = _deep_copy_default()['notifications']
