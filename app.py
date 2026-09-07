@@ -232,7 +232,7 @@ def do_scan():
             if result['status'] != 'success':
                 detail = f"服务不可达: {result['error_message']}"
                 print(f"  [EVENT] {detail}", flush=True)
-                notify_event('服务不可达', detail, srv_name, severity='重要')
+                notify_event('服务不可达', result['error_message'], srv_name, severity='重要')
 
             else:
                 server_type = srv.get('type', '')
@@ -270,6 +270,8 @@ def do_scan():
                         extra = (f"，CN={detail_item.get('common_name') or 'UNDEF'}"
                                  f"，虚拟IP={detail_item.get('virtual_ip') or '未分配'}")
                     notify_detail = f"{action_text}: {detail_item['ip']}（{location}{extra}）"
+                    # 通知消息不再重复动作词（“新客户端上线: IP（…）”只出现一次）
+                    notify_text = f"{detail_item['ip']}（{location}{extra}）"
                     structured = json.dumps({
                         'ip': detail_item['ip'],
                         'connected_since': connected_since,
@@ -292,12 +294,12 @@ def do_scan():
                         severity=severity
                     )
                     if should_notify:
-                        notify_event(action_text, notify_detail, srv_name, severity=severity)
+                        notify_event(action_text, notify_text, srv_name, severity=severity)
                     if severity == '紧急':
                         emergency_key = (srv_name, session_key[0], session_key[1])
                         active_emergency_alerts[emergency_key] = {
                             'last_notified_at': now_ts,
-                            'detail': notify_detail,
+                            'detail': notify_text,
                             'event_type': action_text
                         }
 
@@ -321,7 +323,7 @@ def do_scan():
                                  f"，虚拟IP={detail_item.get('virtual_ip') or '未分配'}")
                     active_emergency_alerts[emergency_key] = {
                         'last_notified_at': now_ts,
-                        'detail': f"新客户端上线: {detail_item['ip']}（{location}{extra}）",
+                        'detail': f"{detail_item['ip']}（{location}{extra}）",
                         'event_type': '新客户端上线'
                     }
                 for emergency_key in list(active_emergency_alerts):

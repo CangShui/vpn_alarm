@@ -131,7 +131,7 @@ function renderTable(tab, items) {
             html += '<td>' + e.id + '</td>';
             html += '<td>' + esc(e.event_time) + '</td>';
             html += '<td>' + severityBadge(e.severity) + '</td>';
-            html += '<td><span class="event-type">' + esc(e.event_type) + '</span></td>';
+            html += '<td><span class="event-type">' + eventTypeLabel(e.event_type) + '</span></td>';
             html += '<td>' + esc(e.server_name) + '</td>';
             html += '<td>' + formatEventDetail(e.event_type, e.detail, e.event_time) + '</td>';
             html += '<td>' + (e.notified ? '是' : '否') + '</td>';
@@ -220,9 +220,24 @@ function severityBadge(severity) {
     return '<span class="severity-badge ' + cls + '">' + esc(value) + '</span>';
 }
 
+function eventTypeLabel(eventType) {
+    var map = {
+        'new_client_alert': '客户端上线',
+        'connection_request': '连接请求',
+        '服务不可达': '服务不可达'
+    };
+    return map[eventType] || esc(eventType);
+}
+
+function dedupeLocationGroup(text) {
+    if (!text) return text;
+    // 清理重复地点分组，如 （波兰）（波兰） -> （波兰）
+    return text.replace(/（([^（）]*?)）（\1）/g, '（$1）');
+}
+
 function formatEventDetail(eventType, detail, eventTime) {
-    // 对 new_client_alert 事件尝试解析结构化数据，动态计算连接时长
-    if (eventType === 'new_client_alert' && detail && detail.indexOf('|||') !== -1) {
+    // 对带结构化数据的事件尝试解析，动态计算连接时长
+    if (detail && detail.indexOf('|||') !== -1) {
         var parts = detail.split('|||');
         var humanPart = esc(parts[0] || '');
         var structuredPart = parts[1] || '';
@@ -231,12 +246,12 @@ function formatEventDetail(eventType, detail, eventTime) {
             var connectedSince = data.connected_since || '';
             var dynamicAge = formatConnectionAgeDynamic(connectedSince, eventTime);
             // 用动态时长替换静态时长
-            return humanPart.replace(/已连接 \d+ 秒/, dynamicAge);
+            return dedupeLocationGroup(humanPart.replace(/已连接 \d+ 秒/, dynamicAge));
         } catch (e) {
             // 解析失败，降级为原始 detail
         }
     }
-    return esc(detail);
+    return dedupeLocationGroup(esc(detail));
 }
 
 function formatConnectionAgeDynamic(connectedSince, eventTime) {

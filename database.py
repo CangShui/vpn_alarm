@@ -67,6 +67,59 @@ def init_db():
     conn.close()
     # 修复 severity 字段引入前的历史事件等级（一次性，幂等）
     reclassify_legacy_events()
+    # 修复历史“提示”事件的文案与类型（一次性，幂等）
+    fix_legacy_prompt_wording()
+
+
+def fix_legacy_prompt_wording():
+    """历史“提示”事件文案与类型纠正（一次性）。
+
+    2.0.6 之前所有新客户端告警（包括未认证请求）都记为
+    event_type=new_client_alert、详情以“新客户端上线”开头。
+    这里把已重算为“提示”的事件改为 connection_request / “未认证连接请求”，
+    并清理可能重复的地点分组（如 （波兰）（波兰））。
+    """
+    try:
+        conn = get_connection()
+        marker = conn.execute(
+            "SELECT value FROM config_store WHERE key='prompt_wording_fix_done'"
+        ).fetchone()
+        if marker:
+            conn.close()
+            return 0
+        rows = conn.execute(
+            "SELECT id, detail FROM events "
+            "WHERE severity='提示' AND event_type='new_client_alert'"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            detail = row['detail'] or ''
+            if '|||' in detail:
+                human, structured = detail.split('|||', 1)
+            else:
+                human, structured = detail, ''
+            human = human.replace('新客户端上线', '未认证连接请求', 1)
+            # 清理重复地点分组，如 （波兰）（波兰）
+            human = re.sub(r'（([^（）]*?)）（\1）', r'（\1）', human)
+            new_detail = f"{human}|||{structured}" if structured else human
+            conn.execute(
+                "UPDATE events SET event_type='connection_request', detail=? WHERE id=?",
+                (new_detail, row['id'])
+            )
+            updated += 1
+        conn.execute(
+            "INSERT OR REPLACE INTO config_store (key, value, updated_at) "
+            "VALUES ('prompt_wording_fix_done', '1', ?)",
+            (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),)
+        )
+        conn.commit()
+        conn.close()
+        if updated:
+            print(f"[DB] 提示事件文案修复完成：更新 {updated} 条", flush=True)
+        return updated
+    except Exception as exc:
+        print(f"[DB] 提示事件文案修复失败: {exc}", flush=True)
+        return 0
 
 
 def _extract_event_ip(detail):
